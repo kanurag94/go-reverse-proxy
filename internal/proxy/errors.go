@@ -15,7 +15,7 @@ const statusClientClosedRequest = 499
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status := errorStatus(r, err)
 	slog.WarnContext(r.Context(), "upstream request failed",
-		"method", r.Method, "host", r.Host, "path", r.URL.Path, "status", status, "err", err)
+		"method", r.Method, "host", r.Host, "path", r.URL.EscapedPath(), "status", status, "err", err)
 	http.Error(w, http.StatusText(status), status)
 }
 

@@ -1,0 +1,27 @@
+{
+  "listeners": [
+    {
+      "name": "public",
+      "address": "127.0.0.1:8080",
+      "hosts": [
+        {
+          "name": "api",
+          "domains": ["api.local"],
+          "routes": [
+            {"prefix": "/v1", "upstream": "api"},
+            {"prefix": "/", "upstream": "web"}
+          ]
+        },
+        {
+          "name": "static",
+          "domains": ["static.local"],
+          "routes": [{"prefix": "/", "upstream": "web"}]
+        }
+      ]
+    }
+  ],
+  "upstreams": [
+    {"name": "api", "endpoints": ["http://127.0.0.1:9001"]},
+    {"name": "web", "endpoints": ["http://127.0.0.1:9002/site"]}
+  ]
+}

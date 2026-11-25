@@ -53,6 +53,12 @@ func TestLogsRequest(t *testing.T) {
 	}
 }
 
+func TestLogsPathAsSent(t *testing.T) {
+	log := captureLog(t)
+	serve(func(w http.ResponseWriter, r *http.Request) {}, "/a%2Fb")
+	assertLogged(t, log.String(), "path=/a%2Fb ")
+}
+
 func TestImplicitStatus(t *testing.T) {
 	tests := []struct {
 		name string
