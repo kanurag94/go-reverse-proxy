@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,20 +123,27 @@ func (u Upstream) CacheEnabled() bool {
 }
 
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	cfg, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
+	return cfg, nil
+}
 
-	dec := json.NewDecoder(f)
+// Parse decodes a config strictly: unknown fields and data after the object are errors.
+func Parse(data []byte) (*Config, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var cfg Config
 	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
+		return nil, err
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("config %s: data after the top-level object", path)
+		return nil, errors.New("data after the top-level object")
 	}
 	return &cfg, nil
 }
