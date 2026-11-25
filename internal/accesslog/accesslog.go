@@ -17,7 +17,7 @@ func New(next http.Handler) http.Handler {
 				status = http.StatusOK // what net/http sends when the handler sets none
 			}
 			slog.InfoContext(r.Context(), "request",
-				"method", r.Method, "host", r.Host, "path", r.URL.Path,
+				"method", r.Method, "host", r.Host, "path", r.URL.EscapedPath(),
 				"status", status, "bytes", sw.bytes,
 				"duration", time.Since(start), "aborted", aborted)
 		}()
