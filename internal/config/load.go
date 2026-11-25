@@ -51,6 +51,7 @@ type Upstream struct {
 	Endpoints []string       `json:"endpoints"`
 	Health    Health         `json:"health"`
 	Timeouts  Timeouts       `json:"timeouts"`
+	Retries   Retries        `json:"retries"`
 	Cache     *UpstreamCache `json:"cache"`
 }
 
@@ -64,6 +65,12 @@ type Health struct {
 type Timeouts struct {
 	Connect        Duration `json:"connect"`         // establishing the TCP connection
 	ResponseHeader Duration `json:"response_header"` // from the request sent until the response headers arrive
+}
+
+// Retries caps how many endpoints one request may try when they cannot be reached.
+// Zero means the default of 2; 1 turns retries off.
+type Retries struct {
+	Attempts int `json:"attempts"`
 }
 
 // Duration is a time.Duration written in JSON as a string such as "10s" or "1m30s".

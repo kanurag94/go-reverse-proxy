@@ -32,7 +32,8 @@ const validJSON = `{
      "cache": {"enabled": true, "private_headers": ["X-Api-Key"]}},
     {"name": "api-v1", "policy": "failover", "endpoints": ["http://127.0.0.1:9002", "http://127.0.0.1:9003"],
      "health": {"max_failures": 3, "eject_duration": "30s"},
-     "timeouts": {"connect": "2s", "response_header": "10m"}}
+     "timeouts": {"connect": "2s", "response_header": "10m"},
+     "retries": {"attempts": 3}}
   ]
 }`
 
@@ -71,6 +72,9 @@ func TestLoadValid(t *testing.T) {
 	}
 	if to := cfg.Upstreams[1].Timeouts; time.Duration(to.Connect) != 2*time.Second || time.Duration(to.ResponseHeader) != 10*time.Minute {
 		t.Errorf("timeouts = %+v", to)
+	}
+	if a := cfg.Upstreams[1].Retries.Attempts; a != 3 {
+		t.Errorf("retries.attempts = %d, want 3", a)
 	}
 	if cfg.Upstreams[1].CacheEnabled() {
 		t.Error("api-v1 has no cache block, so it must not be cached")

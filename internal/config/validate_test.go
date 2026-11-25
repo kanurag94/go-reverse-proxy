@@ -134,6 +134,8 @@ func TestValidateErrors(t *testing.T) {
 			"timeouts: connect must not be negative"},
 		{"negative header timeout", func(c *config.Config) { upstream(c).Timeouts.ResponseHeader = config.Duration(-time.Second) },
 			"timeouts: response_header must not be negative"},
+		{"negative attempts", func(c *config.Config) { upstream(c).Retries.Attempts = -1 },
+			`upstream "api": retries: attempts must not be negative`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
