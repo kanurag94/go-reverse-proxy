@@ -127,6 +127,11 @@ func TestSwapRejectsListenerChanges(t *testing.T) {
 	if err := live.Swap(mustBuild(t, renamed)); err == nil {
 		t.Fatal("Swap accepted a renamed listener")
 	}
+	secured := oneRoute(":8080", backend(t, "new"))
+	secured.Listeners[0].TLS = []config.Cert{{CertFile: "a.crt", KeyFile: "a.key"}}
+	if err := live.Swap(mustBuild(t, secured)); err == nil {
+		t.Fatal("Swap accepted changed certificates; they are loaded once, at startup")
+	}
 	if got := get(h, "/").Body.String(); got != "old" {
 		t.Errorf("a rejected swap changed routing: went to %q", got)
 	}

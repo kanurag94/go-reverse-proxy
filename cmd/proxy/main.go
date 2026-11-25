@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,9 +40,6 @@ func run(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	if err := supported(cfg); err != nil {
-		return err
-	}
 	store := cache.NewStore(cfg.CacheLimits()) // one store for the process, shared by every snapshot
 	snap, err := router.Build(cfg, store)
 	if err != nil {
@@ -67,14 +65,19 @@ func run(ctx context.Context, path string) error {
 		if err != nil {
 			return err
 		}
+		srv := &http.Server{Handler: accesslog.New(h), ReadHeaderTimeout: 10 * time.Second}
+		if len(l.TLS) > 0 {
+			if srv.TLSConfig, err = tlsConfig(l.TLS); err != nil {
+				return fmt.Errorf("listener %s: %w", l.Name, err)
+			}
+		}
 		ln, err := net.Listen("tcp", l.Address)
 		if err != nil {
 			return err
 		}
-		srv := &http.Server{Handler: accesslog.New(h), ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, srv)
-		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String())
-		go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, srv.Serve(ln)) }()
+		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "tls", srv.TLSConfig != nil)
+		go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, serve(srv, ln)) }()
 	}
 	select {
 	case err := <-errs:
@@ -85,23 +88,32 @@ func run(ctx context.Context, path string) error {
 	}
 }
 
-// supported rejects what this binary cannot serve yet.
-func supported(cfg *config.Config) error {
-	for _, l := range cfg.Listeners {
-		if len(l.TLS) > 0 {
-			return fmt.Errorf("listener %s: TLS listeners are not supported yet", l.Name)
-		}
+// serve serves ln, over TLS when srv has a TLS config. ServeTLS also turns on HTTP/2.
+func serve(srv *http.Server, ln net.Listener) error {
+	if srv.TLSConfig != nil {
+		return srv.ServeTLS(ln, "", "")
 	}
-	return nil
+	return srv.Serve(ln)
+}
+
+// tlsConfig loads a listener's certificates. With several, crypto/tls picks the one
+// matching the client's SNI, falling back to the first.
+func tlsConfig(certs []config.Cert) (*tls.Config, error) {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	for i, c := range certs {
+		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("tls %d: %w", i, err)
+		}
+		cfg.Certificates = append(cfg.Certificates, cert)
+	}
+	return cfg, nil
 }
 
 // reload swaps in the config in content. On any error the current one keeps serving.
 func reload(content []byte, store *cache.Store, live *router.Live) error {
 	cfg, err := config.Parse(content)
 	if err != nil {
-		return err
-	}
-	if err := supported(cfg); err != nil {
 		return err
 	}
 	snap, err := router.Build(cfg, store)
