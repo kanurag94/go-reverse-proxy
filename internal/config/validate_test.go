@@ -9,6 +9,7 @@ import (
 
 func validConfig() *config.Config {
 	return &config.Config{
+		Cache: &config.Cache{MaxSize: 1 << 20, MaxResponseSize: 1 << 16},
 		Listeners: []config.Listener{{
 			Name:    "public",
 			Address: ":8443",
@@ -23,7 +24,8 @@ func validConfig() *config.Config {
 			}},
 		}},
 		Upstreams: []config.Upstream{
-			{Name: "api", Endpoints: []string{"http://127.0.0.1:9001"}},
+			{Name: "api", Endpoints: []string{"http://127.0.0.1:9001"},
+				Cache: &config.UpstreamCache{Enabled: true, PrivateHeaders: []string{"X-Api-Key"}}},
 			{Name: "api-v1", Policy: "failover", Endpoints: []string{
 				"http://127.0.0.1:9002",
 				"https://backup.example.com/base?k=v",
@@ -115,6 +117,14 @@ func TestValidateErrors(t *testing.T) {
 		{"endpoint without host", func(c *config.Config) { upstream(c).Endpoints = []string{"http:///path"} }, "endpoint 0: missing host"},
 		{"endpoint with user info", func(c *config.Config) { upstream(c).Endpoints = []string{"http://u:secret@h"} }, "endpoint 0: must not contain user info"},
 		{"endpoint with fragment", func(c *config.Config) { upstream(c).Endpoints = []string{"http://h/#x"} }, "endpoint 0: must not have a fragment"},
+		{"negative cache size", func(c *config.Config) { c.Cache.MaxSize = -1 }, "cache: max_size must not be negative"},
+		{"negative response size", func(c *config.Config) { c.Cache.MaxResponseSize = -1 }, "cache: max_response_size must not be negative"},
+		{"empty private header", func(c *config.Config) { upstream(c).Cache.PrivateHeaders = []string{""} },
+			`upstream "api": cache: private header 0: empty`},
+		{"private header with space", func(c *config.Config) { upstream(c).Cache.PrivateHeaders = []string{"X Api"} },
+			`private header 0: invalid name "X Api"`},
+		{"private header with colon", func(c *config.Config) { upstream(c).Cache.PrivateHeaders = []string{"X-Api-Key:"} },
+			`private header 0: invalid name "X-Api-Key:"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,5 +138,43 @@ func TestValidateErrors(t *testing.T) {
 				t.Fatalf("error leaks a credential: %v", err)
 			}
 		})
+	}
+}
+
+func TestCacheLimits(t *testing.T) {
+	tests := []struct {
+		name                  string
+		cache                 *config.Cache
+		wantMax, wantResponse int64
+	}{
+		{"no cache block", nil, 64 << 20, 1 << 20},
+		{"max_size only", &config.Cache{MaxSize: 100}, 100, 1 << 20},
+		{"max_response_size only", &config.Cache{MaxResponseSize: 50}, 64 << 20, 50},
+		{"both", &config.Cache{MaxSize: 100, MaxResponseSize: 50}, 100, 50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			max, response := (&config.Config{Cache: tt.cache}).CacheLimits()
+			if max != tt.wantMax || response != tt.wantResponse {
+				t.Errorf("CacheLimits() = %d, %d; want %d, %d", max, response, tt.wantMax, tt.wantResponse)
+			}
+		})
+	}
+}
+
+func TestCacheEnabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		cache *config.UpstreamCache
+		want  bool
+	}{
+		{"no cache block", nil, false},
+		{"enabled false", &config.UpstreamCache{PrivateHeaders: []string{"X-Api-Key"}}, false},
+		{"enabled true", &config.UpstreamCache{Enabled: true}, true},
+	}
+	for _, tt := range tests {
+		if got := (config.Upstream{Cache: tt.cache}).CacheEnabled(); got != tt.want {
+			t.Errorf("%s: CacheEnabled() = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
