@@ -37,13 +37,8 @@ func run(path string) error {
 		}
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil               // never send upstream traffic through $HTTP_PROXY
-	transport.DisableCompression = true // pass Accept-Encoding through as the client sent it
-	transport.ResponseHeaderTimeout = 10 * time.Second
-
 	store := cache.NewStore(cfg.CacheLimits()) // one store for the process, shared by every snapshot
-	snap, err := router.Build(cfg, transport, store)
+	snap, err := router.Build(cfg, store)
 	if err != nil {
 		return err
 	}

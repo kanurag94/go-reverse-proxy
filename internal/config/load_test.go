@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
 )
@@ -29,7 +30,9 @@ const validJSON = `{
   "upstreams": [
     {"name": "api", "endpoints": ["http://127.0.0.1:9001"],
      "cache": {"enabled": true, "private_headers": ["X-Api-Key"]}},
-    {"name": "api-v1", "policy": "failover", "endpoints": ["http://127.0.0.1:9002", "http://127.0.0.1:9003"]}
+    {"name": "api-v1", "policy": "failover", "endpoints": ["http://127.0.0.1:9002", "http://127.0.0.1:9003"],
+     "health": {"max_failures": 3, "eject_duration": "30s"},
+     "timeouts": {"connect": "2s", "response_header": "10m"}}
   ]
 }`
 
@@ -63,6 +66,12 @@ func TestLoadValid(t *testing.T) {
 	if c := cfg.Upstreams[0].Cache; c == nil || !c.Enabled || len(c.PrivateHeaders) != 1 || c.PrivateHeaders[0] != "X-Api-Key" {
 		t.Errorf("api cache = %+v", c)
 	}
+	if h := cfg.Upstreams[1].Health; h.MaxFailures != 3 || time.Duration(h.EjectDuration) != 30*time.Second {
+		t.Errorf("health = %+v", h)
+	}
+	if to := cfg.Upstreams[1].Timeouts; time.Duration(to.Connect) != 2*time.Second || time.Duration(to.ResponseHeader) != 10*time.Minute {
+		t.Errorf("timeouts = %+v", to)
+	}
 	if cfg.Upstreams[1].CacheEnabled() {
 		t.Error("api-v1 has no cache block, so it must not be cached")
 	}
@@ -75,6 +84,8 @@ func TestLoadErrors(t *testing.T) {
 		{"unknown field", `{"listeners": [], "upstrem": {}}`, `unknown field "upstrem"`},
 		{"trailing data", `{"listeners": []} {}`, "data after the top-level object"},
 		{"truncated", `{"listeners": [`, "unexpected EOF"},
+		{"duration as a number", `{"upstreams": [{"timeouts": {"connect": 5}}]}`, `duration must be a string like "10s"`},
+		{"duration not parsable", `{"upstreams": [{"timeouts": {"connect": "soon"}}]}`, `invalid duration "soon"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

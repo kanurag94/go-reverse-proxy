@@ -2,12 +2,15 @@ package router_test
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
@@ -45,7 +48,7 @@ func mustBuild(t *testing.T, cfg *config.Config) *router.Snapshot {
 
 func mustBuildWith(t *testing.T, cfg *config.Config, store *cache.Store) *router.Snapshot {
 	t.Helper()
-	s, err := router.Build(cfg, http.DefaultTransport, store)
+	s, err := router.Build(cfg, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +90,7 @@ func TestBuildRoutesToUpstreams(t *testing.T) {
 }
 
 func TestBuildValidates(t *testing.T) {
-	if _, err := router.Build(&config.Config{}, http.DefaultTransport, nil); err == nil {
+	if _, err := router.Build(&config.Config{}, nil); err == nil {
 		t.Fatal("Build accepted a config with no listeners")
 	}
 }
@@ -264,5 +267,81 @@ func TestCacheSurvivesSwap(t *testing.T) {
 	if calls.Load() != 1 || !strings.Contains(rec.Header().Get("Cache-Status"), "; hit") {
 		t.Errorf("after a reload: backend called %d times, Cache-Status %q; want 1, a hit",
 			calls.Load(), rec.Header().Get("Cache-Status"))
+	}
+}
+
+func TestBuildSpreadsAcrossEndpoints(t *testing.T) {
+	cfg := oneRoute(":8080", backend(t, "a"))
+	cfg.Upstreams[0].Endpoints = append(cfg.Upstreams[0].Endpoints, backend(t, "b"))
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	var got []string
+	for range 4 {
+		got = append(got, get(h, "/").Body.String())
+	}
+	if !slices.Equal(got, []string{"a", "b", "a", "b"}) {
+		t.Errorf("responses came from %v, want a, b, a, b", got)
+	}
+}
+
+func TestBuildAppliesUpstreamTimeouts(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		io.WriteString(w, "late")
+	}))
+	t.Cleanup(slow.Close)
+	cfg := oneRoute(":8080", slow.URL)
+	cfg.Upstreams[0].Timeouts.ResponseHeader = config.Duration(50 * time.Millisecond)
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	if rec := get(h, "/"); rec.Code != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want 504 from the upstream's 50ms response_header timeout", rec.Code)
+	}
+}
+
+func TestBuildAppliesUpstreamHealth(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	cfg := oneRoute(":8080", dead.URL)
+	cfg.Upstreams[0].Policy = "failover"
+	cfg.Upstreams[0].Endpoints = append(cfg.Upstreams[0].Endpoints, backend(t, "backup"))
+	cfg.Upstreams[0].Health.MaxFailures = 2
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	var got []int
+	for range 3 {
+		got = append(got, get(h, "/").Code)
+	}
+	if !slices.Equal(got, []int{502, 502, 200}) {
+		t.Errorf("statuses %v, want 502, 502, 200: max_failures 2 ejects the dead primary on its second failure", got)
+	}
+}
+
+func TestSwapClosesOldIdleConnections(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	cfg := oneRoute(":8080", srv.URL)
+	live := router.NewLive(mustBuild(t, cfg))
+	get(mustHandler(t, live, "public"), "/") // leaves an idle keep-alive connection in the first snapshot
+	if err := live.Swap(mustBuild(t, cfg)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replaced snapshot's idle connection is still open")
 	}
 }

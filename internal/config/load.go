@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 type Config struct {
@@ -47,7 +49,37 @@ type Upstream struct {
 	Name      string         `json:"name"`
 	Policy    string         `json:"policy"`
 	Endpoints []string       `json:"endpoints"`
+	Health    Health         `json:"health"`
+	Timeouts  Timeouts       `json:"timeouts"`
 	Cache     *UpstreamCache `json:"cache"`
+}
+
+// Health tunes passive health checking. Zero values mean the defaults.
+type Health struct {
+	MaxFailures   int      `json:"max_failures"`   // consecutive failures to reach an endpoint before it is skipped
+	EjectDuration Duration `json:"eject_duration"` // how long it is skipped
+}
+
+// Timeouts bound the upstream's connections. Zero values mean the defaults.
+type Timeouts struct {
+	Connect        Duration `json:"connect"`         // establishing the TCP connection
+	ResponseHeader Duration `json:"response_header"` // from the request sent until the response headers arrive
+}
+
+// Duration is a time.Duration written in JSON as a string such as "10s" or "1m30s".
+type Duration time.Duration
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return errors.New(`duration must be a string like "10s"`)
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q", s)
+	}
+	*d = Duration(v)
+	return nil
 }
 
 type UpstreamCache struct {

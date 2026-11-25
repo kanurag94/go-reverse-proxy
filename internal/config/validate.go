@@ -60,12 +60,38 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 			return fmt.Errorf("endpoint %d: %w", i, err)
 		}
 	}
+	if err := checkHealth(u.Health); err != nil {
+		return fmt.Errorf("health: %w", err)
+	}
+	if err := checkTimeouts(u.Timeouts); err != nil {
+		return fmt.Errorf("timeouts: %w", err)
+	}
 	if u.Cache != nil {
 		for i, h := range u.Cache.PrivateHeaders {
 			if err := checkHeaderName(h); err != nil {
 				return fmt.Errorf("cache: private header %d: %w", i, err)
 			}
 		}
+	}
+	return nil
+}
+
+func checkHealth(h Health) error {
+	switch {
+	case h.MaxFailures < 0:
+		return errors.New("max_failures must not be negative")
+	case h.EjectDuration < 0:
+		return errors.New("eject_duration must not be negative")
+	}
+	return nil
+}
+
+func checkTimeouts(t Timeouts) error {
+	switch {
+	case t.Connect < 0:
+		return errors.New("connect must not be negative")
+	case t.ResponseHeader < 0:
+		return errors.New("response_header must not be negative")
 	}
 	return nil
 }
