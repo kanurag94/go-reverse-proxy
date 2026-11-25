@@ -45,7 +45,7 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 			eps = append(eps, upstream.NewEndpoint(ep, tr))
 		}
 		health := upstream.Health{MaxFailures: u.Health.MaxFailures, EjectDuration: time.Duration(u.Health.EjectDuration)}
-		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, health))
+		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, health, 1)) // 7b: attempts from config
 		if u.CacheEnabled() {
 			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
 		}
