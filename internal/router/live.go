@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync/atomic"
+	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
@@ -14,7 +15,8 @@ import (
 )
 
 type Snapshot struct {
-	listeners map[string]listener
+	listeners  map[string]listener
+	transports []*http.Transport
 }
 
 type listener struct {
@@ -22,26 +24,33 @@ type listener struct {
 	mux     *Mux
 }
 
-// Build validates cfg and assembles its handlers. store holds cached responses;
-// passing the same one to every Build keeps the cache across reloads.
-func Build(cfg *config.Config, transport http.RoundTripper, store *cache.Store) (*Snapshot, error) {
+// Build validates cfg and assembles its handlers, with one Transport per upstream.
+// store holds cached responses; passing the same one to every Build keeps the
+// cache across reloads.
+func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	s := &Snapshot{listeners: make(map[string]listener)}
 	handlers := make(map[string]http.Handler)
 	for _, u := range cfg.Upstreams {
+		tr := upstream.NewTransport(upstream.Timeouts{
+			Connect:        time.Duration(u.Timeouts.Connect),
+			ResponseHeader: time.Duration(u.Timeouts.ResponseHeader),
+		})
+		s.transports = append(s.transports, tr)
 		var eps []*upstream.Endpoint
 		for _, raw := range u.Endpoints {
 			ep, _ := url.Parse(raw) // validated
-			eps = append(eps, upstream.NewEndpoint(ep, transport))
+			eps = append(eps, upstream.NewEndpoint(ep, tr))
 		}
-		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, upstream.Health{})) // 6b: health from config
+		health := upstream.Health{MaxFailures: u.Health.MaxFailures, EjectDuration: time.Duration(u.Health.EjectDuration)}
+		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, health))
 		if u.CacheEnabled() {
 			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
 		}
 		handlers[u.Name] = h
 	}
-	s := &Snapshot{listeners: make(map[string]listener)}
 	for _, l := range cfg.Listeners {
 		var hosts []Host
 		for _, h := range l.Hosts {
@@ -79,8 +88,16 @@ func (l *Live) Swap(next *Snapshot) error {
 	if !sameListeners(l.current.Load(), next) {
 		return errors.New("listener changes need a restart")
 	}
-	l.current.Store(next)
+	l.current.Swap(next).closeIdle()
 	return nil
+}
+
+// closeIdle closes the snapshot's idle upstream connections. Connections still
+// serving a request are left alone; IdleConnTimeout closes them once they are done.
+func (s *Snapshot) closeIdle() {
+	for _, t := range s.transports {
+		t.CloseIdleConnections()
+	}
 }
 
 func sameListeners(a, b *Snapshot) bool {

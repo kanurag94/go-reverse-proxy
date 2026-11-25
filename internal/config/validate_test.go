@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
 )
@@ -125,6 +126,14 @@ func TestValidateErrors(t *testing.T) {
 			`private header 0: invalid name "X Api"`},
 		{"private header with colon", func(c *config.Config) { upstream(c).Cache.PrivateHeaders = []string{"X-Api-Key:"} },
 			`private header 0: invalid name "X-Api-Key:"`},
+		{"negative max failures", func(c *config.Config) { upstream(c).Health.MaxFailures = -1 },
+			`upstream "api": health: max_failures must not be negative`},
+		{"negative eject duration", func(c *config.Config) { upstream(c).Health.EjectDuration = config.Duration(-time.Second) },
+			"health: eject_duration must not be negative"},
+		{"negative connect timeout", func(c *config.Config) { upstream(c).Timeouts.Connect = config.Duration(-time.Second) },
+			"timeouts: connect must not be negative"},
+		{"negative header timeout", func(c *config.Config) { upstream(c).Timeouts.ResponseHeader = config.Duration(-time.Second) },
+			"timeouts: response_header must not be negative"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
