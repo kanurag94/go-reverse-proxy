@@ -1,9 +1,6 @@
 package proxy
 
-import (
-	"io"
-	"net/http"
-)
+import "net/http"
 
 type Handler struct {
 	upstream http.RoundTripper
@@ -26,6 +23,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer res.Body.Close()
 
 	copyResponseHeader(w.Header(), res)
+	for k := range res.Trailer {
+		w.Header().Add("Trailer", k)
+	}
 	w.WriteHeader(res.StatusCode)
-	io.Copy(w, res.Body)
+	copyBody(w, res)
+	for k, vs := range res.Trailer {
+		w.Header()[http.TrailerPrefix+k] = vs
+	}
 }
