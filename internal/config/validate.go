@@ -66,6 +66,9 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 	if err := checkTimeouts(u.Timeouts); err != nil {
 		return fmt.Errorf("timeouts: %w", err)
 	}
+	if u.Retries.Attempts < 0 {
+		return errors.New("retries: attempts must not be negative")
+	}
 	if u.Cache != nil {
 		for i, h := range u.Cache.PrivateHeaders {
 			if err := checkHeaderName(h); err != nil {

@@ -3,39 +3,61 @@ package upstream
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-var errRefused = errors.New("connect: connection refused")
+var (
+	errRefused = errors.New("connect: connection refused")
+	errReset   = errors.New("connection reset by peer")
+)
 
 // base stands in for the Transport: it records which host each request reached,
 // and fails or answers per host as the test says.
 type base struct {
-	mu     sync.Mutex
-	got    []string
-	fail   map[string]bool
-	status map[string]int
+	mu       sync.Mutex
+	got      []string
+	bodies   map[string]string
+	fail     map[string]bool // fails before sending anything, like a refused dial
+	sendFail map[string]bool // fails after writing the request headers
+	probe    map[string]bool // reads one body byte, then fails before the headers
+	status   map[string]int
 }
 
 func (b *base) RoundTrip(r *http.Request) (*http.Response, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.got = append(b.got, r.URL.Host)
+	host := r.URL.Host
+	b.got = append(b.got, host)
+	defer r.Body.Close() // like Transport: always close the body, even on errors
 	if err := r.Context().Err(); err != nil {
 		return nil, err
 	}
-	if b.fail[r.URL.Host] {
+	switch {
+	case b.fail[host]:
 		return nil, errRefused
+	case b.probe[host]:
+		io.ReadFull(r.Body, make([]byte, 1))
+		return nil, errReset
+	case b.sendFail[host]:
+		if tr := httptrace.ContextClientTrace(r.Context()); tr != nil && tr.WroteHeaders != nil {
+			tr.WroteHeaders()
+		}
+		return nil, errReset
 	}
+	data, _ := io.ReadAll(r.Body)
+	b.bodies[host] = string(data)
 	code := http.StatusOK
-	if c := b.status[r.URL.Host]; c != 0 {
+	if c := b.status[host]; c != 0 {
 		code = c
 	}
 	return &http.Response{StatusCode: code, Body: http.NoBody, Request: r}, nil
@@ -72,7 +94,10 @@ func (c *clock) add(d time.Duration) {
 
 func newTestPool(t *testing.T, policy string, health Health, hosts ...string) (*Pool, *base, *clock) {
 	t.Helper()
-	b := &base{fail: map[string]bool{}, status: map[string]int{}}
+	b := &base{
+		bodies: map[string]string{}, fail: map[string]bool{}, sendFail: map[string]bool{},
+		probe: map[string]bool{}, status: map[string]int{},
+	}
 	var eps []*Endpoint
 	for _, h := range hosts {
 		u, err := url.Parse("http://" + h)
@@ -82,7 +107,7 @@ func newTestPool(t *testing.T, policy string, health Health, hosts ...string) (*
 		eps = append(eps, NewEndpoint(u, b))
 	}
 	c := &clock{t: time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)}
-	p := NewPool(eps, policy, health)
+	p := NewPool(eps, policy, health, 1) // one attempt: these tests look at selection and health alone
 	p.now = c.now
 	return p, b, c
 }
@@ -203,5 +228,163 @@ func TestAllEjectedStillTries(t *testing.T) {
 	sendN(p, 3)
 	if got := b.hosts(); len(got) != 3 || !strings.Contains(strings.Join(got, ""), "a") {
 		t.Errorf("requests went to %v: with every endpoint ejected, the pool must still try one", got)
+	}
+}
+
+// clientBody is a request body from a client, counting how often it is closed.
+type clientBody struct {
+	*strings.Reader
+	closes atomic.Int32
+}
+
+func (c *clientBody) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+func retryPool(t *testing.T, attempts int, health Health, hosts ...string) (*Pool, *base) {
+	t.Helper()
+	p, b, _ := newTestPool(t, "failover", health, hosts...)
+	p.attempts = attempts
+	return p, b
+}
+
+func roundTrip(p *Pool, ctx context.Context, method string, body *clientBody) (*http.Response, error) {
+	r := httptest.NewRequest(method, "/", nil).WithContext(ctx)
+	if body != nil {
+		r.Body, r.ContentLength = body, int64(body.Len())
+	}
+	res, err := p.RoundTrip(r)
+	if err == nil {
+		res.Body.Close()
+	}
+	return res, err
+}
+
+func TestRetriesWhenNothingWasSent(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			p, b := retryPool(t, 2, Health{}, "a", "b")
+			b.fail["a"] = true
+			body := &clientBody{Reader: strings.NewReader("payload")}
+			if _, err := roundTrip(p, context.Background(), method, body); err != nil {
+				t.Fatalf("err = %v, want the retry on b to succeed", err)
+			}
+			assertHosts(t, b, "a", "b")
+			if b.bodies["b"] != "payload" {
+				t.Errorf("b received body %q, want the whole body", b.bodies["b"])
+			}
+			if n := body.closes.Load(); n != 0 {
+				t.Errorf("client body closed %d times; a failed attempt must not close it", n)
+			}
+		})
+	}
+}
+
+func TestRetryAfterSending(t *testing.T) {
+	tests := []struct {
+		name    string
+		method  string
+		body    string
+		retries bool
+	}{
+		{"GET without body", http.MethodGet, "", true},
+		{"DELETE without body", http.MethodDelete, "", true},
+		{"POST", http.MethodPost, "payload", false},
+		{"PUT with body", http.MethodPut, "payload", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, b := retryPool(t, 2, Health{}, "a", "b")
+			b.sendFail["a"] = true
+			var body *clientBody
+			if tt.body != "" {
+				body = &clientBody{Reader: strings.NewReader(tt.body)}
+			}
+			_, err := roundTrip(p, context.Background(), tt.method, body)
+			if tt.retries {
+				assertHosts(t, b, "a", "b")
+				if err != nil {
+					t.Errorf("err = %v, want the retry to succeed", err)
+				}
+			} else {
+				assertHosts(t, b, "a")
+				if err == nil {
+					t.Error("a request the upstream may have processed was retried")
+				}
+			}
+		})
+	}
+}
+
+func TestNoRetryOnceBodyWasRead(t *testing.T) {
+	p, b := retryPool(t, 2, Health{}, "a", "b")
+	b.probe["a"] = true
+	roundTrip(p, context.Background(), http.MethodPost, &clientBody{Reader: strings.NewReader("payload")})
+	assertHosts(t, b, "a")
+}
+
+func TestNoRetryOnResponse(t *testing.T) {
+	p, b := retryPool(t, 2, Health{}, "a", "b")
+	b.status["a"] = http.StatusInternalServerError
+	res, err := roundTrip(p, context.Background(), http.MethodGet, nil)
+	if err != nil || res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("got %v, %v; want the 500 passed through", res, err)
+	}
+	assertHosts(t, b, "a")
+}
+
+func TestNoRetryWhenClientCancelled(t *testing.T) {
+	p, b := retryPool(t, 2, Health{}, "a", "b")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	roundTrip(p, ctx, http.MethodGet, nil)
+	assertHosts(t, b, "a")
+}
+
+func TestAttempts(t *testing.T) {
+	tests := []struct {
+		attempts int
+		want     []string
+	}{
+		{1, []string{"a"}},
+		{2, []string{"a", "b"}},
+		{5, []string{"a", "b", "c"}}, // capped: each endpoint once
+	}
+	for _, tt := range tests {
+		p, b := retryPool(t, tt.attempts, Health{}, "a", "b", "c")
+		for _, h := range []string{"a", "b", "c"} {
+			b.fail[h] = true
+		}
+		if _, err := roundTrip(p, context.Background(), http.MethodGet, nil); !errors.Is(err, errRefused) {
+			t.Errorf("attempts %d: err = %v, want the last attempt's error", tt.attempts, err)
+		}
+		assertHosts(t, b, tt.want...)
+	}
+}
+
+func TestRetrySkipsTriedEndpoint(t *testing.T) {
+	p, b := retryPool(t, 2, Health{MaxFailures: 3}, "a", "b") // a stays healthy after one failure
+	b.fail["a"] = true
+	roundTrip(p, context.Background(), http.MethodGet, nil)
+	assertHosts(t, b, "a", "b")
+}
+
+func TestFinalFailureClosesClientBody(t *testing.T) {
+	p, b := retryPool(t, 2, Health{}, "a", "b")
+	b.fail["a"], b.fail["b"] = true, true
+	body := &clientBody{Reader: strings.NewReader("payload")}
+	roundTrip(p, context.Background(), http.MethodPost, body)
+	if n := body.closes.Load(); n != 1 {
+		t.Errorf("client body closed %d times, want once after the last attempt failed", n)
+	}
+}
+
+func TestDefaultAttemptsIsTwo(t *testing.T) {
+	p, b, _ := newTestPool(t, "failover", Health{}, "a", "b")
+	p.attempts = NewPool(nil, "", Health{}, 0).attempts
+	b.fail["a"] = true
+	if _, err := roundTrip(p, context.Background(), http.MethodGet, nil); err != nil {
+		t.Errorf("err = %v: by default one retry should reach b", err)
 	}
 }

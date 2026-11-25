@@ -306,6 +306,7 @@ func TestBuildAppliesUpstreamHealth(t *testing.T) {
 	cfg.Upstreams[0].Policy = "failover"
 	cfg.Upstreams[0].Endpoints = append(cfg.Upstreams[0].Endpoints, backend(t, "backup"))
 	cfg.Upstreams[0].Health.MaxFailures = 2
+	cfg.Upstreams[0].Retries.Attempts = 1 // no retries: this test is about ejection alone
 	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
 
 	var got []int
@@ -314,6 +315,33 @@ func TestBuildAppliesUpstreamHealth(t *testing.T) {
 	}
 	if !slices.Equal(got, []int{502, 502, 200}) {
 		t.Errorf("statuses %v, want 502, 502, 200: max_failures 2 ejects the dead primary on its second failure", got)
+	}
+}
+
+func TestBuildRetriesOnAnotherEndpoint(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	cfg := oneRoute(":8080", dead.URL)
+	cfg.Upstreams[0].Endpoints = append(cfg.Upstreams[0].Endpoints, backend(t, "alive"))
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	for i := range 4 {
+		if rec := get(h, "/"); rec.Code != http.StatusOK || rec.Body.String() != "alive" {
+			t.Errorf("request %d: %d %q; want every request answered by the live endpoint", i, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestBuildRetriesCanBeTurnedOff(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	cfg := oneRoute(":8080", dead.URL)
+	cfg.Upstreams[0].Endpoints = append(cfg.Upstreams[0].Endpoints, backend(t, "alive"))
+	cfg.Upstreams[0].Retries.Attempts = 1
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	if rec := get(h, "/"); rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502: with attempts 1 the dead endpoint's failure reaches the client", rec.Code)
 	}
 }
 

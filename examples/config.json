@@ -22,7 +22,7 @@
     }
   ],
   "upstreams": [
-    {"name": "api", "endpoints": ["http://127.0.0.1:9001"]},
+    {"name": "api", "endpoints": ["http://127.0.0.1:9001"], "retries": {"attempts": 2}},
     {"name": "web", "endpoints": ["http://127.0.0.1:9002/site"],
      "cache": {"enabled": true, "private_headers": ["X-Api-Key"]}}
   ]
