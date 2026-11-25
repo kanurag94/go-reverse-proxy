@@ -13,34 +13,70 @@ const name = "go-reverse-proxy" // our identifier in Cache-Status (RFC 9211)
 type Handler struct {
 	next     http.Handler
 	store    *Store
+	flights  *group
 	upstream string
 	policy   policy
 	now      func() time.Time
 }
 
 func New(next http.Handler, store *Store, upstream string, credentials []string) *Handler {
-	return &Handler{next: next, store: store, upstream: upstream, policy: newPolicy(credentials), now: time.Now}
+	return &Handler{
+		next: next, store: store, flights: &group{inflight: make(map[string]*flight)},
+		upstream: upstream, policy: newPolicy(credentials), now: time.Now,
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	now := h.now() // request time: an Age counted from here never under-reports
 	key := h.key(r)
 	use, store := requestPolicy(r)
-
-	fwd := "bypass"
-	if store {
-		fwd = "request"
-	}
-	if use {
-		e, reason := h.lookup(key, r, now)
-		if e != nil {
-			serveHit(w, e, now)
-			return
+	if !use {
+		reason := "bypass"
+		if store {
+			reason = "request"
 		}
-		fwd = reason
+		h.fetch(w, r, key, reason, store, nil)
+		return
 	}
 
-	c := &capture{ResponseWriter: w, cacheStatus: name + "; fwd=" + fwd, limit: h.store.maxObject}
+	// 1. A fresh copy is stored: serve it.
+	served, reason := h.serveFresh(w, r, key)
+	if served {
+		return
+	}
+
+	// 2. Another request is already fetching it: wait for that, then look again.
+	f, leader := h.flights.join(key)
+	if !leader {
+		f.wait(r.Context())
+		if served, reason = h.serveFresh(w, r, key); !served {
+			h.fetch(w, r, key, reason, true, nil)
+		}
+		return
+	}
+
+	// 3. Fetch it ourselves; requests that arrive meanwhile wait for us.
+	release := func() { h.flights.release(key, f) }
+	defer release() // after fetch has stored the response, and also if the upstream aborts
+	h.fetch(w, r, key, reason, true, release)
+}
+
+// serveFresh answers from the store if it holds a fresh copy for r,
+// or returns the Cache-Status reason it could not.
+func (h *Handler) serveFresh(w http.ResponseWriter, r *http.Request, key string) (bool, string) {
+	now := h.now()
+	e, reason := h.lookup(key, r, now)
+	if e == nil {
+		return false, reason
+	}
+	serveHit(w, e, now)
+	return true, ""
+}
+
+// fetch forwards r upstream, streaming the response to the client while keeping
+// a copy, and stores it if it may. onGiveUp is told once it will not be stored.
+func (h *Handler) fetch(w http.ResponseWriter, r *http.Request, key, reason string, store bool, onGiveUp func()) {
+	now := h.now() // before forwarding: an Age counted from here never under-reports
+	c := &capture{ResponseWriter: w, cacheStatus: name + "; fwd=" + reason, limit: h.store.maxObject, onGiveUp: onGiveUp}
 	if store {
 		c.freshness = func(code int, hdr http.Header) time.Duration {
 			return h.policy.freshFor(r.Header, code, hdr, now)

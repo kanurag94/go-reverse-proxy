@@ -6,20 +6,34 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-type clock struct{ t time.Time }
+// clock is a fake time source, safe to read while a test moves it.
+type clock struct {
+	mu sync.Mutex
+	t  time.Time
+}
 
-func (c *clock) now() time.Time      { return c.t }
-func (c *clock) add(d time.Duration) { c.t = c.t.Add(d) }
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *clock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 func setup(t *testing.T, next http.HandlerFunc) (*Handler, *clock, *atomic.Int32) {
 	t.Helper()
 	var calls atomic.Int32
-	c := &clock{time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)}
+	c := &clock{t: time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)}
 	h := New(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		next(w, r)

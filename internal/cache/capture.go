@@ -13,6 +13,7 @@ type capture struct {
 	http.ResponseWriter
 	cacheStatus string
 	freshness   func(code int, h http.Header) time.Duration // nil: never store
+	onGiveUp    func()                                      // called once the response cannot be stored
 	limit       int64
 
 	code   int
@@ -27,6 +28,9 @@ func (c *capture) WriteHeader(code int) {
 		c.header = c.Header().Clone()
 		if c.freshness != nil {
 			c.fresh = c.freshness(code, c.header)
+		}
+		if c.fresh <= 0 {
+			c.giveUp()
 		}
 		c.Header().Add("Cache-Status", c.cacheStatus)
 	}
@@ -45,12 +49,20 @@ func (c *capture) Write(b []byte) (int, error) {
 	n, err := c.ResponseWriter.Write(b)
 	if c.fresh > 0 {
 		if err != nil || int64(c.body.Len()+n) > c.limit {
-			c.fresh, c.body = 0, bytes.Buffer{} // the client did not get it all, or it is too big
+			c.giveUp() // the client did not get it all, or it is too big
 		} else {
 			c.body.Write(b[:n])
 		}
 	}
 	return n, err
+}
+
+// giveUp drops the copy for good and tells anyone waiting on this response.
+func (c *capture) giveUp() {
+	c.fresh, c.body = 0, bytes.Buffer{}
+	if c.onGiveUp != nil {
+		c.onGiveUp()
+	}
 }
 
 // FlushError makes a flush before the first write still pass through WriteHeader.
