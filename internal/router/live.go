@@ -30,8 +30,12 @@ func Build(cfg *config.Config, transport http.RoundTripper, store *cache.Store) 
 	}
 	handlers := make(map[string]http.Handler)
 	for _, u := range cfg.Upstreams {
-		ep, _ := url.Parse(u.Endpoints[0]) // validated; step 6 replaces the first endpoint with a pool
-		var h http.Handler = proxy.New(upstream.NewEndpoint(ep, transport))
+		var eps []*upstream.Endpoint
+		for _, raw := range u.Endpoints {
+			ep, _ := url.Parse(raw) // validated
+			eps = append(eps, upstream.NewEndpoint(ep, transport))
+		}
+		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, upstream.Health{})) // 6b: health from config
 		if u.CacheEnabled() {
 			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
 		}

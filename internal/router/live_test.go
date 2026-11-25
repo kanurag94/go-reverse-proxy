@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -264,5 +265,19 @@ func TestCacheSurvivesSwap(t *testing.T) {
 	if calls.Load() != 1 || !strings.Contains(rec.Header().Get("Cache-Status"), "; hit") {
 		t.Errorf("after a reload: backend called %d times, Cache-Status %q; want 1, a hit",
 			calls.Load(), rec.Header().Get("Cache-Status"))
+	}
+}
+
+func TestBuildSpreadsAcrossEndpoints(t *testing.T) {
+	cfg := oneRoute(":8080", backend(t, "a"))
+	cfg.Upstreams[0].Endpoints = append(cfg.Upstreams[0].Endpoints, backend(t, "b"))
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	var got []string
+	for range 4 {
+		got = append(got, get(h, "/").Body.String())
+	}
+	if !slices.Equal(got, []string{"a", "b", "a", "b"}) {
+		t.Errorf("responses came from %v, want a, b, a, b", got)
 	}
 }
