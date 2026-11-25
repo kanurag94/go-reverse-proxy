@@ -13,6 +13,11 @@ func (c *Config) Validate() error {
 	if len(c.Listeners) == 0 {
 		return errors.New("no listeners")
 	}
+	if c.Cache != nil {
+		if err := checkCache(*c.Cache); err != nil {
+			return fmt.Errorf("cache: %w", err)
+		}
+	}
 	upstreams := make(map[string]bool)
 	for i, u := range c.Upstreams {
 		if err := checkUpstream(u, upstreams); err != nil {
@@ -54,6 +59,35 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 		if err := checkEndpoint(e); err != nil {
 			return fmt.Errorf("endpoint %d: %w", i, err)
 		}
+	}
+	if u.Cache != nil {
+		for i, h := range u.Cache.PrivateHeaders {
+			if err := checkHeaderName(h); err != nil {
+				return fmt.Errorf("cache: private header %d: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+func checkCache(c Cache) error {
+	switch {
+	case c.MaxSize < 0:
+		return errors.New("max_size must not be negative")
+	case c.MaxResponseSize < 0:
+		return errors.New("max_response_size must not be negative")
+	}
+	return nil
+}
+
+// checkHeaderName rejects names that could never match a request header,
+// which would silently disable the protection they were configured for.
+func checkHeaderName(h string) error {
+	switch {
+	case h == "":
+		return errors.New("empty")
+	case strings.ContainsAny(h, " \t:"):
+		return fmt.Errorf("invalid name %q", h)
 	}
 	return nil
 }

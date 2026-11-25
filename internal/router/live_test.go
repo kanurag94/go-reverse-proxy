@@ -4,9 +4,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 )
@@ -37,7 +40,12 @@ func oneRoute(address, endpoint string) *config.Config {
 
 func mustBuild(t *testing.T, cfg *config.Config) *router.Snapshot {
 	t.Helper()
-	s, err := router.Build(cfg, http.DefaultTransport)
+	return mustBuildWith(t, cfg, cache.NewStore(1<<20, 1<<16))
+}
+
+func mustBuildWith(t *testing.T, cfg *config.Config, store *cache.Store) *router.Snapshot {
+	t.Helper()
+	s, err := router.Build(cfg, http.DefaultTransport, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +87,7 @@ func TestBuildRoutesToUpstreams(t *testing.T) {
 }
 
 func TestBuildValidates(t *testing.T) {
-	if _, err := router.Build(&config.Config{}, http.DefaultTransport); err == nil {
+	if _, err := router.Build(&config.Config{}, http.DefaultTransport, nil); err == nil {
 		t.Fatal("Build accepted a config with no listeners")
 	}
 }
@@ -176,4 +184,85 @@ func TestConcurrentRequestsDuringSwaps(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+func countingBackend(t *testing.T, calls *atomic.Int32) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Cache-Control", "max-age=60")
+		io.WriteString(w, "cacheable")
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestBuildCachesOnlyEnabledUpstreams(t *testing.T) {
+	tests := []struct {
+		name   string
+		cache  *config.UpstreamCache
+		cached bool
+	}{
+		{"enabled", &config.UpstreamCache{Enabled: true}, true},
+		{"no cache block", nil, false},
+		{"enabled false", &config.UpstreamCache{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			cfg := oneRoute(":8080", countingBackend(t, &calls))
+			cfg.Upstreams[0].Cache = tt.cache
+			h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+			get(h, "/a")
+			rec := get(h, "/a")
+
+			wantCalls, wantStatus := int32(2), false
+			if tt.cached {
+				wantCalls, wantStatus = 1, true
+			}
+			if calls.Load() != wantCalls || rec.Body.String() != "cacheable" {
+				t.Errorf("backend called %d times, body %q; want %d, cacheable", calls.Load(), rec.Body, wantCalls)
+			}
+			if got := rec.Header().Get("Cache-Status") != ""; got != wantStatus {
+				t.Errorf("Cache-Status present = %v, want %v: the cache must wrap only enabled upstreams", got, wantStatus)
+			}
+		})
+	}
+}
+
+func TestBuildPassesPrivateHeaders(t *testing.T) {
+	var calls atomic.Int32
+	cfg := oneRoute(":8080", countingBackend(t, &calls))
+	cfg.Upstreams[0].Cache = &config.UpstreamCache{Enabled: true, PrivateHeaders: []string{"X-Api-Key"}}
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+
+	for range 2 {
+		req := httptest.NewRequest(http.MethodGet, "/a", nil)
+		req.Host = "api.example.com"
+		req.Header.Set("X-Api-Key", "k")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("backend called %d times, want 2: a request with a configured private header must not be shared", calls.Load())
+	}
+}
+
+func TestCacheSurvivesSwap(t *testing.T) {
+	var calls atomic.Int32
+	cfg := oneRoute(":8080", countingBackend(t, &calls))
+	cfg.Upstreams[0].Cache = &config.UpstreamCache{Enabled: true}
+	store := cache.NewStore(1<<20, 1<<16)
+	live := router.NewLive(mustBuildWith(t, cfg, store))
+	h := mustHandler(t, live, "public")
+
+	get(h, "/a")
+	if err := live.Swap(mustBuildWith(t, cfg, store)); err != nil {
+		t.Fatal(err)
+	}
+	rec := get(h, "/a")
+	if calls.Load() != 1 || !strings.Contains(rec.Header().Get("Cache-Status"), "; hit") {
+		t.Errorf("after a reload: backend called %d times, Cache-Status %q; want 1, a hit",
+			calls.Load(), rec.Header().Get("Cache-Status"))
+	}
 }

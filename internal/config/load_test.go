@@ -12,6 +12,7 @@ import (
 )
 
 const validJSON = `{
+  "cache": {"max_size": 1048576, "max_response_size": 65536},
   "listeners": [{
     "name": "public",
     "address": ":8443",
@@ -26,7 +27,8 @@ const validJSON = `{
     }]
   }],
   "upstreams": [
-    {"name": "api", "endpoints": ["http://127.0.0.1:9001"]},
+    {"name": "api", "endpoints": ["http://127.0.0.1:9001"],
+     "cache": {"enabled": true, "private_headers": ["X-Api-Key"]}},
     {"name": "api-v1", "policy": "failover", "endpoints": ["http://127.0.0.1:9002", "http://127.0.0.1:9003"]}
   ]
 }`
@@ -54,6 +56,15 @@ func TestLoadValid(t *testing.T) {
 	}
 	if u := cfg.Upstreams[1]; u.Name != "api-v1" || u.Policy != "failover" || len(u.Endpoints) != 2 {
 		t.Errorf("upstream = %+v", u)
+	}
+	if c := cfg.Cache; c == nil || c.MaxSize != 1<<20 || c.MaxResponseSize != 1<<16 {
+		t.Errorf("cache = %+v", c)
+	}
+	if c := cfg.Upstreams[0].Cache; c == nil || !c.Enabled || len(c.PrivateHeaders) != 1 || c.PrivateHeaders[0] != "X-Api-Key" {
+		t.Errorf("api cache = %+v", c)
+	}
+	if cfg.Upstreams[1].CacheEnabled() {
+		t.Error("api-v1 has no cache block, so it must not be cached")
 	}
 }
 
