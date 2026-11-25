@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,7 @@ type Snapshot struct {
 
 type listener struct {
 	address string
+	tls     []config.Cert // loaded once at startup, so a change needs a restart
 	mux     *Mux
 }
 
@@ -60,7 +62,7 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 			}
 			hosts = append(hosts, Host{Domains: h.Domains, Routes: routes})
 		}
-		s.listeners[l.Name] = listener{address: l.Address, mux: NewMux(hosts)}
+		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, mux: NewMux(hosts)}
 	}
 	return s, nil
 }
@@ -105,7 +107,7 @@ func sameListeners(a, b *Snapshot) bool {
 		return false
 	}
 	for name, la := range a.listeners {
-		if lb, ok := b.listeners[name]; !ok || lb.address != la.address {
+		if lb, ok := b.listeners[name]; !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) {
 			return false
 		}
 	}
