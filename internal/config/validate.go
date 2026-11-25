@@ -156,15 +156,15 @@ func checkRoute(r Route, earlier []Route, upstreams map[string]bool) error {
 		return fmt.Errorf("unknown upstream %q", r.Upstream)
 	}
 	for _, e := range earlier {
-		if covers(e.Prefix, r.Prefix) {
+		if Covers(e.Prefix, r.Prefix) {
 			return fmt.Errorf("unreachable, covered by %q", e.Prefix)
 		}
 	}
 	return nil
 }
 
-// covers reports whether prefix matches path on a segment boundary:
+// Covers reports whether prefix matches path on a segment boundary:
 // "/v1" covers "/v1" and "/v1/chat" but not "/v10".
-func covers(prefix, path string) bool {
+func Covers(prefix, path string) bool {
 	return prefix == "/" || path == prefix || strings.HasPrefix(path, prefix+"/")
 }
