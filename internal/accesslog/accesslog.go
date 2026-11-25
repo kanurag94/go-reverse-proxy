@@ -1,7 +1,9 @@
 package accesslog
 
 import (
+	"bufio"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -47,3 +49,12 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 
 // Unwrap lets http.ResponseController reach Flush on the real writer.
 func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
+// Hijack records 101: a handler takes over the connection to switch protocols.
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, brw, err := http.NewResponseController(sw.ResponseWriter).Hijack()
+	if err == nil && sw.status == 0 {
+		sw.status = http.StatusSwitchingProtocols
+	}
+	return conn, brw, err
+}

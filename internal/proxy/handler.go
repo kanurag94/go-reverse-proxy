@@ -22,6 +22,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer res.Body.Close()
 
+	if res.StatusCode == http.StatusSwitchingProtocols {
+		switchProtocols(w, r, res)
+		return
+	}
 	copyResponseHeader(w.Header(), res)
 	for k := range res.Trailer {
 		w.Header().Add("Trailer", k)

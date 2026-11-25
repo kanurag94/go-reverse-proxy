@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,4 +105,32 @@ func TestLogsAbortedRequest(t *testing.T) {
 		io.WriteString(w, "partial")
 		panic(http.ErrAbortHandler)
 	}, "/")
+}
+
+func TestLogsSwitchedProtocolAs101(t *testing.T) {
+	log := captureLog(t)
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		accesslog.New(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, brw, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			brw.WriteString("HTTP/1.1 101 Switching Protocols\r\n\r\n")
+			brw.Flush()
+			conn.Close()
+		})).ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+	<-done
+
+	assertLogged(t, log.String(), "status=101")
 }
