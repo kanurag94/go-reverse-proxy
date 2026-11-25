@@ -19,10 +19,10 @@ type Handler struct {
 	now      func() time.Time
 }
 
-func New(next http.Handler, store *Store, upstream string, credentials []string) *Handler {
+func New(next http.Handler, store *Store, upstream string, privateHeaders []string) *Handler {
 	return &Handler{
 		next: next, store: store, flights: &group{inflight: make(map[string]*flight)},
-		upstream: upstream, policy: newPolicy(credentials), now: time.Now,
+		upstream: upstream, policy: newPolicy(privateHeaders), now: time.Now,
 	}
 }
 

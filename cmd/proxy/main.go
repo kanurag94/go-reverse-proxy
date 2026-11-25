@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 )
@@ -41,7 +42,8 @@ func run(path string) error {
 	transport.DisableCompression = true // pass Accept-Encoding through as the client sent it
 	transport.ResponseHeaderTimeout = 10 * time.Second
 
-	snap, err := router.Build(cfg, transport)
+	store := cache.NewStore(cfg.CacheLimits()) // one store for the process, shared by every snapshot
+	snap, err := router.Build(cfg, transport, store)
 	if err != nil {
 		return err
 	}

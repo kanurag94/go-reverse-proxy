@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sync/atomic"
 
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
 	"github.com/kanurag94/go-reverse-proxy/internal/proxy"
 	"github.com/kanurag94/go-reverse-proxy/internal/upstream"
@@ -21,14 +22,20 @@ type listener struct {
 	mux     *Mux
 }
 
-func Build(cfg *config.Config, transport http.RoundTripper) (*Snapshot, error) {
+// Build validates cfg and assembles its handlers. store holds cached responses;
+// passing the same one to every Build keeps the cache across reloads.
+func Build(cfg *config.Config, transport http.RoundTripper, store *cache.Store) (*Snapshot, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	handlers := make(map[string]http.Handler)
 	for _, u := range cfg.Upstreams {
 		ep, _ := url.Parse(u.Endpoints[0]) // validated; step 6 replaces the first endpoint with a pool
-		handlers[u.Name] = proxy.New(upstream.NewEndpoint(ep, transport))
+		var h http.Handler = proxy.New(upstream.NewEndpoint(ep, transport))
+		if u.CacheEnabled() {
+			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
+		}
+		handlers[u.Name] = h
 	}
 	s := &Snapshot{listeners: make(map[string]listener)}
 	for _, l := range cfg.Listeners {

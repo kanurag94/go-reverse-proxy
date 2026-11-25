@@ -14,18 +14,18 @@ var cacheableStatus = map[int]bool{
 	404: true, 405: true, 410: true, 414: true, 501: true,
 }
 
-// policy decides what a shared cache may store. credentials are the request
+// policy decides what a shared cache may store. privateHeaders are the request
 // headers that identify a user; their responses are private unless marked shared.
 type policy struct {
-	credentials []string
+	privateHeaders []string
 }
 
 func newPolicy(extra []string) policy {
-	creds := []string{"Authorization", "Cookie"}
+	private := []string{"Authorization", "Cookie"}
 	for _, h := range extra {
-		creds = append(creds, http.CanonicalHeaderKey(h))
+		private = append(private, http.CanonicalHeaderKey(h))
 	}
-	return policy{credentials: creds}
+	return policy{privateHeaders: private}
 }
 
 // requestPolicy reports whether a stored response may answer r, and whether
@@ -59,7 +59,7 @@ func (p policy) freshFor(req http.Header, status int, h http.Header, now time.Ti
 		len(h["Set-Cookie"]) > 0 || len(h["Trailer"]) > 0 || slices.Contains(varyNames(h), "*") {
 		return 0
 	}
-	identified := slices.ContainsFunc(p.credentials, func(k string) bool { _, ok := req[k]; return ok })
+	identified := slices.ContainsFunc(p.privateHeaders, func(k string) bool { _, ok := req[k]; return ok })
 	if identified && !has(cc, "public", "s-maxage", "must-revalidate") {
 		return 0 // RFC 9111 §3.5: never share one user's response with another
 	}

@@ -1,4 +1,5 @@
 {
+  "cache": {"max_size": 67108864, "max_response_size": 1048576},
   "listeners": [
     {
       "name": "public",
@@ -22,6 +23,7 @@
   ],
   "upstreams": [
     {"name": "api", "endpoints": ["http://127.0.0.1:9001"]},
-    {"name": "web", "endpoints": ["http://127.0.0.1:9002/site"]}
+    {"name": "web", "endpoints": ["http://127.0.0.1:9002/site"],
+     "cache": {"enabled": true, "private_headers": ["X-Api-Key"]}}
   ]
 }
