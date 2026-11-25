@@ -16,6 +16,7 @@ func New(upstream http.RoundTripper) *Handler {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out := r.Clone(r.Context())
 	out.RequestURI = ""
+	prepareRequest(out)
 
 	res, err := h.upstream.RoundTrip(out)
 	if err != nil {
@@ -24,11 +25,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer res.Body.Close()
 
-	for k, vs := range res.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
+	copyResponseHeader(w.Header(), res)
 	w.WriteHeader(res.StatusCode)
 	io.Copy(w, res.Body)
 }
