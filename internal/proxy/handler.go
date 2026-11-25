@@ -17,7 +17,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.upstream.RoundTrip(out)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		writeError(w, r, err)
 		return
 	}
 	defer res.Body.Close()
