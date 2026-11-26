@@ -8,7 +8,10 @@ import (
 )
 
 func TestNewTransportDefaults(t *testing.T) {
-	tr := upstream.NewTransport(upstream.Timeouts{})
+	tr, err := upstream.NewTransport(upstream.Timeouts{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if tr.Proxy != nil {
 		t.Error("Proxy is set: upstream traffic must not follow $HTTP_PROXY")
 	}
@@ -27,7 +30,10 @@ func TestNewTransportDefaults(t *testing.T) {
 }
 
 func TestNewTransportUsesTimeouts(t *testing.T) {
-	tr := upstream.NewTransport(upstream.Timeouts{Connect: time.Second, ResponseHeader: 10 * time.Minute})
+	tr, err := upstream.NewTransport(upstream.Timeouts{Connect: time.Second, ResponseHeader: 10 * time.Minute}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if tr.ResponseHeaderTimeout != 10*time.Minute {
 		t.Errorf("ResponseHeaderTimeout = %v, want 10m", tr.ResponseHeaderTimeout)
 	}

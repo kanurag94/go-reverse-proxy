@@ -18,10 +18,12 @@ func New(next http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK // what net/http sends when the handler sets none
 			}
-			slog.InfoContext(r.Context(), "request",
-				"method", r.Method, "host", r.Host, "path", r.URL.EscapedPath(),
-				"status", status, "bytes", sw.bytes,
-				"duration", time.Since(start), "aborted", aborted)
+			args := []any{"method", r.Method, "host", r.Host, "path", r.URL.EscapedPath(),
+				"status", status, "bytes", sw.bytes, "duration", time.Since(start), "aborted", aborted}
+			if r.TLS != nil {
+				args = append(args, "sni", r.TLS.ServerName, "alpn", r.TLS.NegotiatedProtocol)
+			}
+			slog.InfoContext(r.Context(), "request", args...)
 		}()
 		next.ServeHTTP(sw, r)
 		aborted = false

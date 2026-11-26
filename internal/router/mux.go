@@ -49,6 +49,11 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (m *Mux) HasDomain(host string) bool {
+	_, ok := m.hosts[hostname(host)]
+	return ok
+}
+
 func hostname(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h

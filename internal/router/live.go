@@ -23,6 +23,7 @@ type Snapshot struct {
 type listener struct {
 	address string
 	tls     []config.Cert // loaded once at startup, so a change needs a restart
+	bump    string        // the bump CA's dir, also loaded once at startup
 	mux     *Mux
 }
 
@@ -36,10 +37,11 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 	s := &Snapshot{listeners: make(map[string]listener)}
 	handlers := make(map[string]http.Handler)
 	for _, u := range cfg.Upstreams {
-		tr := upstream.NewTransport(upstream.Timeouts{
-			Connect:        time.Duration(u.Timeouts.Connect),
-			ResponseHeader: time.Duration(u.Timeouts.ResponseHeader),
-		})
+		timeouts := upstream.Timeouts{Connect: time.Duration(u.Timeouts.Connect), ResponseHeader: time.Duration(u.Timeouts.ResponseHeader)}
+		tr, err := upstream.NewTransport(timeouts, u.CAFile())
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: tls: %w", u.Name, err)
+		}
 		s.transports = append(s.transports, tr)
 		var eps []*upstream.Endpoint
 		for _, raw := range u.Endpoints {
@@ -62,7 +64,7 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 			}
 			hosts = append(hosts, Host{Domains: h.Domains, Routes: routes})
 		}
-		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, mux: NewMux(hosts)}
+		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, bump: l.BumpDir(), mux: NewMux(hosts)}
 	}
 	return s, nil
 }
@@ -86,6 +88,13 @@ func (l *Live) Handler(name string) (http.Handler, error) {
 	}), nil
 }
 
+// HasDomain reports whether listener's current config routes host. Bumping asks it
+// before minting, so a reload that adds or removes a domain applies at once.
+func (l *Live) HasDomain(listener, host string) bool {
+	li, ok := l.current.Load().listeners[listener]
+	return ok && li.mux.HasDomain(host)
+}
+
 func (l *Live) Swap(next *Snapshot) error {
 	if !sameListeners(l.current.Load(), next) {
 		return errors.New("listener changes need a restart")
@@ -107,7 +116,8 @@ func sameListeners(a, b *Snapshot) bool {
 		return false
 	}
 	for name, la := range a.listeners {
-		if lb, ok := b.listeners[name]; !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) {
+		lb, ok := b.listeners[name]
+		if !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) || lb.bump != la.bump {
 			return false
 		}
 	}

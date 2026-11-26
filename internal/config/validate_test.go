@@ -77,6 +77,8 @@ func TestValidateErrors(t *testing.T) {
 			c.Listeners = append(c.Listeners, second)
 		}, `listener "other": address ":8443" already used by listener "public"`},
 		{"cert without key", func(c *config.Config) { listener(c).TLS[0].KeyFile = "" }, `listener "public": tls 0: cert_file and key_file are required`},
+		{"bump with tls", func(c *config.Config) { listener(c).Bump = &config.Bump{CADir: "ca"} }, `listener "public": bump and tls are exclusive`},
+		{"bump without ca_dir", func(c *config.Config) { listener(c).TLS, listener(c).Bump = nil, &config.Bump{} }, `listener "public": bump: ca_dir is required`},
 		{"no hosts", func(c *config.Config) { listener(c).Hosts = nil }, `listener "public": no hosts`},
 
 		{"host without name", func(c *config.Config) { host(c).Name = "" }, `listener "public": host 0: empty name`},
@@ -113,6 +115,7 @@ func TestValidateErrors(t *testing.T) {
 		{"duplicate upstream name", func(c *config.Config) { c.Upstreams[1].Name = "api" }, `upstream "api": duplicate name`},
 		{"unknown policy", func(c *config.Config) { upstream(c).Policy = "random" }, `upstream "api": unknown policy "random"`},
 		{"no endpoints", func(c *config.Config) { upstream(c).Endpoints = nil }, `upstream "api": no endpoints`},
+		{"upstream tls without ca_file", func(c *config.Config) { upstream(c).TLS = &config.UpstreamTLS{} }, `upstream "api": tls: ca_file is required`},
 		{"endpoint not a URL", func(c *config.Config) { upstream(c).Endpoints = []string{"http://[::1"} }, `upstream "api": endpoint 0: invalid URL`},
 		{"endpoint bad scheme", func(c *config.Config) { upstream(c).Endpoints = []string{"ftp://h"} }, "endpoint 0: scheme must be http or https"},
 		{"endpoint without host", func(c *config.Config) { upstream(c).Endpoints = []string{"http:///path"} }, "endpoint 0: missing host"},

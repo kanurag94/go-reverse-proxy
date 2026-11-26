@@ -69,6 +69,9 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 	if u.Retries.Attempts < 0 {
 		return errors.New("retries: attempts must not be negative")
 	}
+	if u.TLS != nil && u.TLS.CAFile == "" {
+		return errors.New("tls: ca_file is required")
+	}
 	if u.Cache != nil {
 		for i, h := range u.Cache.PrivateHeaders {
 			if err := checkHeaderName(h); err != nil {
@@ -159,6 +162,14 @@ func checkListener(l Listener, names map[string]bool, addrs map[string]string, u
 	for i, cert := range l.TLS {
 		if cert.CertFile == "" || cert.KeyFile == "" {
 			return fmt.Errorf("tls %d: cert_file and key_file are required", i)
+		}
+	}
+	if l.Bump != nil {
+		switch {
+		case len(l.TLS) > 0:
+			return errors.New("bump and tls are exclusive")
+		case l.Bump.CADir == "":
+			return errors.New("bump: ca_dir is required")
 		}
 	}
 	if len(l.Hosts) == 0 {
