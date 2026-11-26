@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
+	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 )
 
 const helloTimeout = 10 * time.Second // how long a client may take to send its ClientHello

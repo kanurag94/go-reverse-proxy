@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
-	"github.com/kanurag94/go-reverse-proxy/pkg/router"
 )
 
 const name = "api.example.test"

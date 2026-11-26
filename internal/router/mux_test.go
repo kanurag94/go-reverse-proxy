@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/router"
+	"github.com/kanurag94/go-reverse-proxy/internal/router"
 )
 
 func named(name string) http.Handler {

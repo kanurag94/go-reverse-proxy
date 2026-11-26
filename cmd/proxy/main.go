@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/internal/bump"
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/intercept"
+	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/internal/watch"
-	"github.com/kanurag94/go-reverse-proxy/pkg/accesslog"
-	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
-	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
-	"github.com/kanurag94/go-reverse-proxy/pkg/intercept"
-	"github.com/kanurag94/go-reverse-proxy/pkg/router"
 )
 
 func main() {

@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
-	"github.com/kanurag94/go-reverse-proxy/pkg/router"
 )
 
 func backend(t *testing.T, name string) string {
@@ -408,18 +408,27 @@ func TestBuildRejectsMissingCAFile(t *testing.T) {
 	}
 }
 
-// marking is a hook that sets X-Hooked on responses and counts the exchanges it starts.
-func marking(calls *atomic.Int32) hook.Hook {
-	return func(*http.Request) *hook.Processor {
-		calls.Add(1)
-		return &hook.Processor{OnResponseHeaders: func(_ int, h http.Header) *hook.ImmediateResponse {
-			h.Set("X-Hooked", "yes")
-			return nil
-		}}
-	}
+// marker sets X-Hooked on responses.
+type marker struct{ hook.EmptyFilter }
+
+func (marker) OnResponseHeaders(_ int, h http.Header, _ bool) hook.Status {
+	h.Set("X-Hooked", "yes")
+	return hook.Continue
 }
 
-func buildHooked(t *testing.T, cfg *config.Config, store *cache.Store, hooks func(string) []hook.Hook) http.Handler {
+// markers makes a marker per request and counts them.
+type markers struct{ calls *atomic.Int32 }
+
+func (m markers) Create(hook.Handle) hook.Filter {
+	m.calls.Add(1)
+	return marker{}
+}
+
+func (markers) OnDestroy() {}
+
+func marking(calls *atomic.Int32) hook.FilterFactory { return markers{calls} }
+
+func buildHooked(t *testing.T, cfg *config.Config, store *cache.Store, hooks func(string) []hook.FilterFactory) http.Handler {
 	t.Helper()
 	s, err := router.Build(cfg, store, router.Options{Hooks: hooks})
 	if err != nil {
@@ -430,8 +439,8 @@ func buildHooked(t *testing.T, cfg *config.Config, store *cache.Store, hooks fun
 
 func TestBuildAppliesHooks(t *testing.T) {
 	var calls atomic.Int32
-	h := buildHooked(t, oneRoute(":8080", backend(t, "a")), nil, func(string) []hook.Hook {
-		return []hook.Hook{marking(&calls)}
+	h := buildHooked(t, oneRoute(":8080", backend(t, "a")), nil, func(string) []hook.FilterFactory {
+		return []hook.FilterFactory{marking(&calls)}
 	})
 	if rec := get(h, "/"); rec.Body.String() != "a" || rec.Header().Get("X-Hooked") != "yes" {
 		t.Errorf("got %q, X-Hooked %q; want a, through the hook", rec.Body, rec.Header().Get("X-Hooked"))
@@ -444,10 +453,10 @@ func TestHooksAreChosenPerUpstream(t *testing.T) {
 	cfg.Listeners[0].Hosts[0].Routes = []config.Route{{Prefix: "/b", Upstream: "other"}, {Prefix: "/", Upstream: "up"}}
 	var asked []string
 	var calls atomic.Int32
-	h := buildHooked(t, cfg, nil, func(name string) []hook.Hook {
+	h := buildHooked(t, cfg, nil, func(name string) []hook.FilterFactory {
 		asked = append(asked, name)
 		if name == "up" {
-			return []hook.Hook{marking(&calls)}
+			return []hook.FilterFactory{marking(&calls)}
 		}
 		return nil
 	})
@@ -467,8 +476,8 @@ func TestCacheHitSkipsHooks(t *testing.T) {
 	var backendCalls, hookCalls atomic.Int32
 	cfg := oneRoute(":8080", countingBackend(t, &backendCalls))
 	cfg.Upstreams[0].Cache = &config.UpstreamCache{Enabled: true}
-	h := buildHooked(t, cfg, cache.NewStore(1<<20, 1<<16), func(string) []hook.Hook {
-		return []hook.Hook{marking(&hookCalls)}
+	h := buildHooked(t, cfg, cache.NewStore(1<<20, 1<<16), func(string) []hook.FilterFactory {
+		return []hook.FilterFactory{marking(&hookCalls)}
 	})
 	get(h, "/a")
 	get(h, "/a") // served from the cache

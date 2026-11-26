@@ -11,9 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/filterchain"
 	"github.com/kanurag94/go-reverse-proxy/internal/proxy"
 	"github.com/kanurag94/go-reverse-proxy/internal/upstream"
-	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
 )
@@ -37,7 +38,7 @@ type Options struct {
 	// Hooks returns the hooks to run on an upstream's exchanges, inside its
 	// cache: they see only what reaches the upstream. Build asks once per
 	// upstream, so a reload asks again. nil, or no hooks, means none.
-	Hooks func(upstream string) []hook.Hook
+	Hooks func(upstream string) []hook.FilterFactory
 }
 
 // Build validates cfg and assembles its handlers, with one Transport per upstream.
@@ -64,7 +65,7 @@ func Build(cfg *config.Config, store *cache.Store, opts Options) (*Snapshot, err
 		health := upstream.Health{MaxFailures: u.Health.MaxFailures, EjectDuration: time.Duration(u.Health.EjectDuration)}
 		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, health, u.Retries.Attempts))
 		if opts.Hooks != nil {
-			h = hook.New(h, opts.Hooks(u.Name)...)
+			h = filterchain.New(h, opts.Hooks(u.Name)...)
 		}
 		if u.CacheEnabled() {
 			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
