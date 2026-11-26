@@ -89,7 +89,9 @@ func run(ctx context.Context, path string) error {
 		return err
 	case <-ctx.Done():
 		slog.Info("shutting down")
-		return shutdown(servers, 30*time.Second)
+		err := shutdown(servers, 30*time.Second)
+		live.Close()
+		return err
 	}
 }
 

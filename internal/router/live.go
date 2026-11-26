@@ -145,6 +145,10 @@ func (l *Live) Swap(next *Snapshot) error {
 	return nil
 }
 
+// Close releases the current snapshot once nothing will be served from it: its
+// DNS lookups stop, idle connections close and plugin factories are destroyed.
+func (l *Live) Close() { l.current.Load().release() }
+
 // release ends a snapshot that will not serve new requests: its DNS lookups stop,
 // its idle connections close, and its plugin factories are destroyed.
 func (s *Snapshot) release() {

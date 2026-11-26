@@ -1,16 +1,22 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
+	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
 )
 
 func backend(t *testing.T, body string) string {
@@ -110,5 +116,50 @@ func TestShutdownFinishesInFlightRequest(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Errorf("shutdown: %v", err)
+	}
+}
+
+// lifetime counts a plugin's factories as the proxy creates and destroys them.
+type lifetime struct{ created, destroyed atomic.Int32 }
+
+func (l *lifetime) Create(string, []byte) (hook.FilterFactory, error) {
+	l.created.Add(1)
+	return lifetimeFactory{l}, nil
+}
+
+type lifetimeFactory struct{ l *lifetime }
+
+func (lifetimeFactory) Create(hook.Handle) hook.Filter { return nil }
+func (f lifetimeFactory) OnDestroy()                   { f.l.destroyed.Add(1) }
+
+var plugins atomic.Int32
+
+func TestShutdownDestroysPluginFactories(t *testing.T) {
+	p := &lifetime{}
+	name := fmt.Sprintf("lifetime-%d", plugins.Add(1)) // the registry outlives one run of a test
+	hook.Register(name, p)
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := `{"listeners": [{"name": "public", "address": "127.0.0.1:0", "hooks": [{"name": "` + name + `"}],
+	  "hosts": [{"name": "api", "domains": ["api.local"], "routes": [{"prefix": "/", "upstream": "up"}]}]}],
+	 "upstreams": [{"name": "up", "endpoints": ["` + backend(t, "a") + `"]}]}`
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, path) }()
+	for deadline := time.Now().Add(5 * time.Second); p.created.Load() == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the plugin was never created")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return after the context ended")
+	}
+	if got := p.destroyed.Load(); got != 1 {
+		t.Errorf("destroyed %d factories at shutdown, want 1", got)
 	}
 }
