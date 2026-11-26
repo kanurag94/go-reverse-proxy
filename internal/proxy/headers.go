@@ -23,9 +23,14 @@ var hopHeaders = []string{
 func prepareRequest(r *http.Request) {
 	h := r.Header
 	trailers := hasToken(h["Te"], "trailers")
+	upgrade := upgradeType(h)
 	removeHopHeaders(h)
 	if trailers {
 		h.Set("Te", "trailers")
+	}
+	if upgrade != "" {
+		h.Set("Connection", "Upgrade")
+		h.Set("Upgrade", upgrade)
 	}
 
 	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
