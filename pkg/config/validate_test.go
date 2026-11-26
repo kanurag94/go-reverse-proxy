@@ -85,6 +85,8 @@ func TestValidateErrors(t *testing.T) {
 		}, `listener "public": connect: address must be loopback`},
 		{"connect with tls", func(c *config.Config) { listener(c).Connect, listener(c).Address = true, "127.0.0.1:8080" },
 			`listener "public": connect and tls are exclusive`},
+		{"dns refresh too often", func(c *config.Config) { upstream(c).DNSRefresh = config.Duration(100 * time.Millisecond) },
+			`upstream "api": dns_refresh must be at least 1s`},
 		{"h2c with an https endpoint", func(c *config.Config) { c.Upstreams[1].H2C = true },
 			`upstream "api-v1": h2c: endpoint 1 is https; h2c is for http:// endpoints`},
 		{"hook without name", func(c *config.Config) { listener(c).Hooks = []config.Hook{{}} }, `listener "public": hook 0: empty name`},

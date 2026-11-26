@@ -93,15 +93,16 @@ func (m HeaderMatch) Matches(h http.Header) bool {
 
 // Upstream is a named set of endpoints and how to reach them.
 type Upstream struct {
-	Name      string         `json:"name"`
-	Policy    string         `json:"policy"`
-	Endpoints []string       `json:"endpoints"`
-	Health    Health         `json:"health"`
-	Timeouts  Timeouts       `json:"timeouts"`
-	Retries   Retries        `json:"retries"`
-	H2C       bool           `json:"h2c"` // speak HTTP/2 without TLS to the endpoints, which must be http://
-	TLS       *UpstreamTLS   `json:"tls"`
-	Cache     *UpstreamCache `json:"cache"`
+	Name       string         `json:"name"`
+	Policy     string         `json:"policy"`
+	Endpoints  []string       `json:"endpoints"`
+	Health     Health         `json:"health"`
+	Timeouts   Timeouts       `json:"timeouts"`
+	Retries    Retries        `json:"retries"`
+	H2C        bool           `json:"h2c"`
+	DNSRefresh Duration       `json:"dns_refresh"` // set: one member per resolved address, looked up again this often // speak HTTP/2 without TLS to the endpoints, which must be http://
+	TLS        *UpstreamTLS   `json:"tls"`
+	Cache      *UpstreamCache `json:"cache"`
 }
 
 // Health tunes passive health checking. Zero values mean the defaults.

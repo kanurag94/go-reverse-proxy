@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Validate reports the first problem in c, naming where it is.
@@ -62,6 +63,9 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 		if err := checkEndpoint(e); err != nil {
 			return fmt.Errorf("endpoint %d: %w", i, err)
 		}
+	}
+	if d := time.Duration(u.DNSRefresh); d != 0 && d < time.Second {
+		return errors.New("dns_refresh must be at least 1s")
 	}
 	if u.H2C {
 		for i, e := range u.Endpoints {

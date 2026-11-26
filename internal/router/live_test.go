@@ -566,3 +566,32 @@ func TestBuildRoutesByMethod(t *testing.T) {
 		t.Errorf("GET went to %q, want reads", got)
 	}
 }
+
+// localhost resolves to 127.0.0.1 and ::1, and the backend listens on one of
+// them: the other is ejected and every request still arrives.
+func TestDNSUpstreamServesEveryAddress(t *testing.T) {
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(backend(t, "a"), "http://"))
+	cfg := oneRoute(":8080", "http://localhost:"+port)
+	cfg.Upstreams[0].DNSRefresh = config.Duration(time.Second)
+	live := router.NewLive(mustBuild(t, cfg))
+	t.Cleanup(func() { live.Swap(mustBuild(t, oneRoute(":8080", backend(t, "b")))) })
+	h := mustHandler(t, live, "public")
+	for range 4 {
+		if got := get(h, "/").Body.String(); got != "a" {
+			t.Fatalf("got %q, want a", got)
+		}
+	}
+}
+
+func TestRejectedSwapReleasesTheSnapshot(t *testing.T) {
+	var d atomic.Int32
+	name := register(t, tagging("x", &d))
+	live := router.NewLive(mustBuild(t, oneRoute(":8080", backend(t, "a"))))
+	moved := withHooks(oneRoute(":9090", backend(t, "b")), name)
+	if err := live.Swap(mustBuild(t, moved)); err == nil {
+		t.Fatal("Swap accepted a changed listener address")
+	}
+	if d.Load() != 1 {
+		t.Errorf("destroyed %d factories of the rejected snapshot, want 1", d.Load())
+	}
+}

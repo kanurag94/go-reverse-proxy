@@ -3,8 +3,10 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -24,7 +26,9 @@ import (
 type Snapshot struct {
 	listeners  map[string]listener
 	transports []*http.Transport
+	pools      []*upstream.Pool
 	factories  []hook.FilterFactory
+	stop       context.CancelFunc // ends the snapshot's DNS lookups
 }
 
 type listener struct {
@@ -43,6 +47,17 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	ctx, stop := context.WithCancel(context.Background())
+	s, err := build(ctx, cfg, store)
+	if err != nil {
+		stop()
+		return nil, err
+	}
+	s.stop = stop
+	return s, nil
+}
+
+func build(ctx context.Context, cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 	s := &Snapshot{listeners: make(map[string]listener)}
 	handlers := make(map[string]http.Handler)
 	for _, u := range cfg.Upstreams {
@@ -58,7 +73,12 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 			eps = append(eps, upstream.NewEndpoint(ep, tr))
 		}
 		health := upstream.Health{MaxFailures: u.Health.MaxFailures, EjectDuration: time.Duration(u.Health.EjectDuration)}
-		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, health, u.Retries.Attempts))
+		pool := upstream.NewPool(eps, u.Policy, health, u.Retries.Attempts)
+		if refresh := time.Duration(u.DNSRefresh); refresh > 0 {
+			pool.FollowDNS(ctx, net.DefaultResolver, refresh)
+		}
+		s.pools = append(s.pools, pool)
+		var h http.Handler = proxy.New(pool)
 		if u.CacheEnabled() {
 			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
 		}
@@ -118,16 +138,21 @@ func (l *Live) HasDomain(listener, host string) bool {
 // Swap makes next current, unless it changes what listeners read only at start.
 func (l *Live) Swap(next *Snapshot) error {
 	if !sameListeners(l.current.Load(), next) {
+		next.release()
 		return errors.New("listener changes need a restart")
 	}
-	old := l.current.Swap(next)
-	old.closeIdle()
-	destroy(old.factories)
+	l.current.Swap(next).release()
 	return nil
 }
 
-// closeIdle closes the snapshot's idle upstream connections. Connections still
-// serving a request are left alone; IdleConnTimeout closes them once they are done.
+// release ends a snapshot that will not serve new requests: its DNS lookups stop,
+// its idle connections close, and its plugin factories are destroyed.
+func (s *Snapshot) release() {
+	s.stop()
+	s.closeIdle()
+	destroy(s.factories)
+}
+
 // hookFactories creates the filter factories of l's plugins, in order. On an
 // error it destroys the ones already created.
 func hookFactories(l config.Listener) ([]hook.FilterFactory, error) {
@@ -157,9 +182,14 @@ func destroy(factories []hook.FilterFactory) {
 	}
 }
 
+// closeIdle closes the snapshot's idle upstream connections. Connections still
+// serving a request are left alone; IdleConnTimeout closes them once they are done.
 func (s *Snapshot) closeIdle() {
 	for _, t := range s.transports {
 		t.CloseIdleConnections()
+	}
+	for _, p := range s.pools {
+		p.CloseIdleConnections()
 	}
 }
 
