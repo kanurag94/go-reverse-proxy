@@ -20,7 +20,8 @@ type ConfigFactory interface {
 }
 
 // FilterFactory creates a Filter per request. Create may return nil to skip a
-// request. OnDestroy runs when the factory's config has been replaced.
+// request. OnDestroy runs once the factory's config has been replaced or failed
+// to load; requests already in flight may still be using its filters.
 type FilterFactory interface {
 	Create(h Handle) Filter
 	OnDestroy()

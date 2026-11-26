@@ -44,7 +44,7 @@ func run(ctx context.Context, path string) error {
 		return err
 	}
 	store := cache.NewStore(cfg.CacheLimits()) // one store for the process, shared by every snapshot
-	snap, err := router.Build(cfg, store, router.Options{})
+	snap, err := router.Build(cfg, store)
 	if err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func reload(content []byte, store *cache.Store, live *router.Live) error {
 	if err != nil {
 		return err
 	}
-	snap, err := router.Build(cfg, store, router.Options{})
+	snap, err := router.Build(cfg, store)
 	if err != nil {
 		return err
 	}

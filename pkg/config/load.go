@@ -33,7 +33,15 @@ type Listener struct {
 	Address string `json:"address"`
 	TLS     []Cert `json:"tls"`
 	Bump    *Bump  `json:"bump"`
+	Hooks   []Hook `json:"hooks"`
 	Hosts   []Host `json:"hosts"`
+}
+
+// Hook names a registered plugin to run on a listener, in list order. Config is
+// passed to the plugin unparsed.
+type Hook struct {
+	Name   string          `json:"name"`
+	Config json.RawMessage `json:"config"`
 }
 
 // Bump terminates TLS with certificates minted on the fly for the listener's

@@ -43,7 +43,7 @@ func bumping(t *testing.T, endpoint, caFile string) (string, *x509.CertPool) {
 	if caFile != "" {
 		u.TLS = &config.UpstreamTLS{CAFile: caFile}
 	}
-	snap, err := router.Build(&config.Config{Listeners: []config.Listener{l}, Upstreams: []config.Upstream{u}}, nil, router.Options{})
+	snap, err := router.Build(&config.Config{Listeners: []config.Listener{l}, Upstreams: []config.Upstream{u}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

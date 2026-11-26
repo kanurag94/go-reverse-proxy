@@ -173,6 +173,16 @@ func checkListener(l Listener, names map[string]bool, addrs map[string]string, u
 			return errors.New("bump: ca_dir is required")
 		}
 	}
+	hooks := make(map[string]bool)
+	for i, h := range l.Hooks {
+		switch {
+		case h.Name == "":
+			return fmt.Errorf("hook %d: empty name", i)
+		case hooks[h.Name]:
+			return fmt.Errorf("hook %d: %q listed twice", i, h.Name)
+		}
+		hooks[h.Name] = true
+	}
 	if len(l.Hosts) == 0 {
 		return errors.New("no hosts")
 	}

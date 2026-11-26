@@ -31,7 +31,7 @@ func newLive(t *testing.T, content string) (*router.Live, *cache.Store) {
 		t.Fatal(err)
 	}
 	store := cache.NewStore(cfg.CacheLimits())
-	snap, err := router.Build(cfg, store, router.Options{})
+	snap, err := router.Build(cfg, store)
 	if err != nil {
 		t.Fatal(err)
 	}
