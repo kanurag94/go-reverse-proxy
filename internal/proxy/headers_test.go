@@ -216,3 +216,27 @@ func TestRemovesHopByHopResponseHeaders(t *testing.T) {
 		t.Errorf("Via = %q", got)
 	}
 }
+
+// Alt-Svc names the upstream's other protocols and ports (say HTTP/3 on UDP 443).
+// Forwarded under our name, it would send clients to try them against us.
+func TestDropsAltSvcFromUpstream(t *testing.T) {
+	res := &http.Response{
+		StatusCode: http.StatusOK,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Body:       http.NoBody,
+		Header: http.Header{
+			"Alt-Svc":      {`h3=":443"; ma=86400`},
+			"Content-Type": {"text/plain"},
+		},
+	}
+	rec := httptest.NewRecorder()
+	proxy.New(fixed{res}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if v, ok := rec.Header()["Alt-Svc"]; ok {
+		t.Errorf("Alt-Svc reached the client as %q", v)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain" {
+		t.Errorf("Content-Type = %q, other headers must pass", got)
+	}
+}

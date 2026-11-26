@@ -51,6 +51,9 @@ func prepareRequest(r *http.Request) {
 
 func copyResponseHeader(dst http.Header, res *http.Response) {
 	removeHopHeaders(res.Header)
+	// Alt-Svc advertises the upstream's protocols and ports (RFC 7838), not ours:
+	// forwarded, clients would try HTTP/3 on UDP against an address that has none.
+	res.Header.Del("Alt-Svc")
 	for k, vs := range res.Header {
 		for _, v := range vs {
 			dst.Add(k, v)
