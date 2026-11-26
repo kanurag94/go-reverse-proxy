@@ -61,6 +61,13 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 			return fmt.Errorf("endpoint %d: %w", i, err)
 		}
 	}
+	if u.H2C {
+		for i, e := range u.Endpoints {
+			if ep, _ := url.Parse(e); ep.Scheme == "https" {
+				return fmt.Errorf("h2c: endpoint %d is https; h2c is for http:// endpoints", i)
+			}
+		}
+	}
 	if err := checkHealth(u.Health); err != nil {
 		return fmt.Errorf("health: %w", err)
 	}

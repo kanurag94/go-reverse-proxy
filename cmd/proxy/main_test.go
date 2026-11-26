@@ -94,7 +94,7 @@ func TestShutdownFinishesInFlightRequest(t *testing.T) {
 	}()
 	<-started
 	done := make(chan error, 1)
-	go func() { done <- shutdown([]server{srv}, 5*time.Second) }()
+	go func() { done <- shutdown([]*http.Server{srv}, 5*time.Second) }()
 	for { // release the handler only once shutdown has stopped accepting connections
 		c, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {

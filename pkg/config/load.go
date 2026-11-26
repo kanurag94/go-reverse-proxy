@@ -78,6 +78,7 @@ type Upstream struct {
 	Health    Health         `json:"health"`
 	Timeouts  Timeouts       `json:"timeouts"`
 	Retries   Retries        `json:"retries"`
+	H2C       bool           `json:"h2c"` // speak HTTP/2 without TLS to the endpoints, which must be http://
 	TLS       *UpstreamTLS   `json:"tls"`
 	Cache     *UpstreamCache `json:"cache"`
 }

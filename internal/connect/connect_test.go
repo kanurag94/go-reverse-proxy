@@ -2,7 +2,6 @@ package connect_test
 
 import (
 	"bufio"
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 	"github.com/kanurag94/go-reverse-proxy/internal/connect"
+	"github.com/kanurag94/go-reverse-proxy/internal/intercept"
 )
 
 const bumped = "api.example.test"
@@ -40,16 +40,24 @@ func start(t *testing.T) proxy {
 		}
 		fmt.Fprintf(w, "%s auth=%q", r.Proto, r.Header.Get("Proxy-Authorization"))
 	})
-	srv := connect.NewServer(ca, func(n string) bool { return n == bumped }, h)
+	ln := serve(t, intercept.New(ca, func(n string) bool { return n == bumped }), h)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Cert())
+	return proxy{addr: ln.Addr().String(), roots: roots}
+}
+
+// serve runs one server for the proxy's socket and the tunnels it bumps, as main does.
+func serve(t *testing.T, tunnels *intercept.Listener, h http.Handler) net.Listener {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv := &http.Server{Handler: connect.Handler(h, tunnels)}
 	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
-	roots := x509.NewCertPool()
-	roots.AddCert(ca.Cert())
-	return proxy{addr: ln.Addr().String(), roots: roots}
+	go srv.Serve(tunnels)
+	t.Cleanup(func() { srv.Close() })
+	return ln
 }
 
 func through(t *testing.T, p proxy, url, launchID string, roots *x509.CertPool, h2 bool, header http.Header) string {
@@ -171,13 +179,7 @@ func TestNoTunnelCredentialMeansNone(t *testing.T) {
 }
 
 func TestWithoutCANothingIsBumped(t *testing.T) {
-	srv := connect.NewServer(nil, func(string) bool { return true }, http.NotFoundHandler())
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go srv.Serve(ln)
-	defer srv.Shutdown(context.Background())
+	ln := serve(t, intercept.New(nil, func(string) bool { return true }), http.NotFoundHandler())
 	real := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "real") }))
 	defer real.Close()
 	realRoots := x509.NewCertPool()

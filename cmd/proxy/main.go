@@ -62,41 +62,27 @@ func run(ctx context.Context, path string) error {
 	}
 	defer stopWatch()
 
-	var servers []server
-	errs := make(chan error, len(cfg.Listeners))
+	var servers []*http.Server
+	errs := make(chan error, 2*len(cfg.Listeners))
 	for _, l := range cfg.Listeners {
 		h, err := live.Handler(l.Name)
 		if err != nil {
 			return err
 		}
-		srv := &http.Server{Handler: accesslog.New(h), ReadHeaderTimeout: 10 * time.Second}
-		if len(l.TLS) > 0 {
-			if srv.TLSConfig, err = tlsConfig(l.TLS); err != nil {
-				return fmt.Errorf("listener %s: %w", l.Name, err)
-			}
-		}
+		srv := httpServer(accesslog.New(h))
 		ln, err := net.Listen("tcp", l.Address)
 		if err != nil {
 			return err
 		}
-		if l.Connect {
-			cs, err := connecting(l, live, srv.Handler)
-			if err != nil {
-				return fmt.Errorf("listener %s: %w", l.Name, err)
-			}
-			servers = append(servers, cs)
-			slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "connect", true, "bump", l.BumpDir() != "")
-			go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, cs.Serve(ln)) }()
-			continue
-		}
-		if l.BumpDir() != "" {
-			if ln, err = intercepting(ln, l, live); err != nil {
-				return fmt.Errorf("listener %s: %w", l.Name, err)
-			}
+		sockets, err := listen(l, ln, live, srv)
+		if err != nil {
+			return fmt.Errorf("listener %s: %w", l.Name, err)
 		}
 		servers = append(servers, srv)
-		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "tls", len(l.TLS) > 0, "bump", l.BumpDir() != "")
-		go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, serve(srv, ln)) }()
+		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String())
+		for _, s := range sockets {
+			go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, srv.Serve(s)) }()
+		}
 	}
 	select {
 	case err := <-errs:
@@ -107,37 +93,45 @@ func run(ctx context.Context, path string) error {
 	}
 }
 
-// serve serves ln, over TLS when srv has a TLS config. ServeTLS also turns on HTTP/2.
-func serve(srv *http.Server, ln net.Listener) error {
-	if srv.TLSConfig != nil {
-		return srv.ServeTLS(ln, "", "")
-	}
-	return srv.Serve(ln)
-}
-
-// intercepting wraps ln so that l's configured names are bumped with l's CA and
-// every other connection passes through to where it was going.
-func intercepting(ln net.Listener, l config.Listener, live *router.Live) (net.Listener, error) {
+// listen returns the sockets srv serves for l: ln itself, ln wrapped for TLS or
+// bumping, or for a CONNECT listener ln plus the tunnels it bumps.
+func listen(l config.Listener, ln net.Listener, live *router.Live, srv *http.Server) ([]net.Listener, error) {
 	ca, err := loadCA(l)
 	if err != nil {
 		return nil, err
 	}
-	return intercept.NewListener(ln, ca, bumps(l, live)), nil
-}
-
-// connecting is l's CONNECT front end, serving plain and bumped requests with h.
-func connecting(l config.Listener, live *router.Live, h http.Handler) (*connect.Server, error) {
-	var ca *bump.CA
-	if l.BumpDir() != "" {
-		var err error
-		if ca, err = loadCA(l); err != nil {
+	bumps := func(name string) bool { return live.HasDomain(l.Name, name) }
+	switch {
+	case l.Connect:
+		tunnels := intercept.New(ca, bumps)
+		srv.Handler = connect.Handler(srv.Handler, tunnels)
+		return []net.Listener{ln, tunnels}, nil
+	case ca != nil:
+		return []net.Listener{intercept.NewListener(ln, ca, bumps)}, nil
+	case len(l.TLS) > 0:
+		cfg, err := tlsConfig(l.TLS)
+		if err != nil {
 			return nil, err
 		}
+		return []net.Listener{tls.NewListener(ln, cfg)}, nil
 	}
-	return connect.NewServer(ca, bumps(l, live), h), nil
+	return []net.Listener{ln}, nil
 }
 
+// httpServer serves h over HTTP/1, h2 (on TLS connections) and h2c.
+func httpServer(h http.Handler) *http.Server {
+	p := new(http.Protocols)
+	p.SetHTTP1(true)
+	p.SetHTTP2(true)
+	p.SetUnencryptedHTTP2(true)
+	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, Protocols: p}
+}
+
+// loadCA loads the CA of a bumping listener, creating it on first use; nil when l does not bump.
 func loadCA(l config.Listener) (*bump.CA, error) {
+	if l.BumpDir() == "" {
+		return nil, nil
+	}
 	ca, err := bump.LoadOrCreate(l.BumpDir())
 	if err != nil {
 		return nil, fmt.Errorf("bump: %w", err)
@@ -146,18 +140,10 @@ func loadCA(l config.Listener) (*bump.CA, error) {
 	return ca, nil
 }
 
-// bumps reports whether l routes name, so only configured names are bumped.
-func bumps(l config.Listener, live *router.Live) func(name string) bool {
-	return func(name string) bool { return live.HasDomain(l.Name, name) }
-}
-
-// server is what shutdown stops: an http.Server or a connect.Server.
-type server interface{ Shutdown(context.Context) error }
-
 // tlsConfig loads a listener's certificates. With several, crypto/tls picks the one
 // matching the client's SNI, falling back to the first.
 func tlsConfig(certs []config.Cert) (*tls.Config, error) {
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}
 	for i, c := range certs {
 		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 		if err != nil {
@@ -184,7 +170,7 @@ func reload(content []byte, store *cache.Store, live *router.Live) error {
 // shutdown stops every server from accepting connections and waits up to grace
 // for in-flight requests. All at once: one at a time, the others would keep
 // accepting while the first drains.
-func shutdown(servers []server, grace time.Duration) error {
+func shutdown(servers []*http.Server, grace time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 	errs := make([]error, len(servers))

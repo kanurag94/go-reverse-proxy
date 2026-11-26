@@ -47,7 +47,7 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 	handlers := make(map[string]http.Handler)
 	for _, u := range cfg.Upstreams {
 		timeouts := upstream.Timeouts{Connect: time.Duration(u.Timeouts.Connect), ResponseHeader: time.Duration(u.Timeouts.ResponseHeader)}
-		tr, err := upstream.NewTransport(timeouts, u.CAFile())
+		tr, err := upstream.NewTransport(timeouts, u.CAFile(), u.H2C)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: tls: %w", u.Name, err)
 		}

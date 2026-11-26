@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,21 +48,11 @@ func bumping(t *testing.T, endpoint, caFile string) (string, *x509.CertPool) {
 	}
 	live := router.NewLive(snap)
 	h, _ := live.Handler(l.Name)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	il, err := intercepting(ln, l, live)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Handler: accesslog.New(h)}
-	go srv.Serve(il)
-	t.Cleanup(func() { srv.Close() })
+	addr := serveListener(t, l, live, accesslog.New(h))
 	pemBytes, _ := os.ReadFile(filepath.Join(caDir, "ca.pem"))
 	roots := x509.NewCertPool()
 	roots.AppendCertsFromPEM(pemBytes)
-	return ln.Addr().String(), roots
+	return addr, roots
 }
 
 func call(t *testing.T, addr string, roots *x509.CertPool, h2 bool) (*http.Response, string) {
