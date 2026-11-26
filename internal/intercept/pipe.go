@@ -2,8 +2,10 @@ package intercept
 
 import (
 	"io"
+	"log/slog"
 	"net"
 	"sync"
+	"time"
 )
 
 // pipe copies bytes both ways between client and up. When either side finishes
@@ -17,4 +19,28 @@ func pipe(client, up net.Conn) (sent, received int64) {
 	wg.Go(func() { received, _ = io.Copy(client, up); closeBoth() })
 	wg.Wait()
 	return sent, received
+}
+
+// passThrough sends c's bytes, its ClientHello included, to dst and dst's back,
+// then logs the connection.
+func (l *Listener) passThrough(c net.Conn, dst, sni string) {
+	defer c.Close()
+	log := slog.With("mode", "passthrough", "client", c.RemoteAddr().String(), "sni", sni, "destination", dst)
+	if dst == "" {
+		log.Warn("connection", "err", "no destination: no SNI, and no front end named one")
+		return
+	}
+	up, err := l.dial(l.ctx, "tcp", dst)
+	if err != nil {
+		log.Warn("connection", "err", err)
+		return
+	}
+	if up.RemoteAddr().String() == c.LocalAddr().String() {
+		up.Close()
+		log.Warn("connection", "err", "the destination is this proxy") // it would dial itself until out of descriptors
+		return
+	}
+	start := time.Now()
+	sent, received := pipe(c, up)
+	log.Info("connection", "sent", sent, "received", received, "duration", time.Since(start))
 }
