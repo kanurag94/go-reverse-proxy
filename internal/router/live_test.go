@@ -14,6 +14,7 @@ import (
 
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
+	"github.com/kanurag94/go-reverse-proxy/internal/hook"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 )
 
@@ -48,7 +49,7 @@ func mustBuild(t *testing.T, cfg *config.Config) *router.Snapshot {
 
 func mustBuildWith(t *testing.T, cfg *config.Config, store *cache.Store) *router.Snapshot {
 	t.Helper()
-	s, err := router.Build(cfg, store)
+	s, err := router.Build(cfg, store, router.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestBuildRoutesToUpstreams(t *testing.T) {
 }
 
 func TestBuildValidates(t *testing.T) {
-	if _, err := router.Build(&config.Config{}, nil); err == nil {
+	if _, err := router.Build(&config.Config{}, nil, router.Options{}); err == nil {
 		t.Fatal("Build accepted a config with no listeners")
 	}
 }
@@ -402,7 +403,77 @@ func TestHasDomain(t *testing.T) {
 func TestBuildRejectsMissingCAFile(t *testing.T) {
 	cfg := oneRoute(":8080", backend(t, "a"))
 	cfg.Upstreams[0].TLS = &config.UpstreamTLS{CAFile: "/nonexistent/ca.pem"}
-	if _, err := router.Build(cfg, nil); err == nil || !strings.Contains(err.Error(), `upstream "up": tls:`) {
+	if _, err := router.Build(cfg, nil, router.Options{}); err == nil || !strings.Contains(err.Error(), `upstream "up": tls:`) {
 		t.Errorf("err = %v, want it to name upstream \"up\" tls", err)
+	}
+}
+
+// marking is a hook that sets X-Hooked on responses and counts the exchanges it starts.
+func marking(calls *atomic.Int32) hook.Hook {
+	return func(*http.Request) *hook.Processor {
+		calls.Add(1)
+		return &hook.Processor{OnResponseHeaders: func(_ int, h http.Header) *hook.ImmediateResponse {
+			h.Set("X-Hooked", "yes")
+			return nil
+		}}
+	}
+}
+
+func buildHooked(t *testing.T, cfg *config.Config, store *cache.Store, hooks func(string) []hook.Hook) http.Handler {
+	t.Helper()
+	s, err := router.Build(cfg, store, router.Options{Hooks: hooks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustHandler(t, router.NewLive(s), "public")
+}
+
+func TestBuildAppliesHooks(t *testing.T) {
+	var calls atomic.Int32
+	h := buildHooked(t, oneRoute(":8080", backend(t, "a")), nil, func(string) []hook.Hook {
+		return []hook.Hook{marking(&calls)}
+	})
+	if rec := get(h, "/"); rec.Body.String() != "a" || rec.Header().Get("X-Hooked") != "yes" {
+		t.Errorf("got %q, X-Hooked %q; want a, through the hook", rec.Body, rec.Header().Get("X-Hooked"))
+	}
+}
+
+func TestHooksAreChosenPerUpstream(t *testing.T) {
+	cfg := oneRoute(":8080", backend(t, "a"))
+	cfg.Upstreams = append(cfg.Upstreams, config.Upstream{Name: "other", Endpoints: []string{backend(t, "b")}})
+	cfg.Listeners[0].Hosts[0].Routes = []config.Route{{Prefix: "/b", Upstream: "other"}, {Prefix: "/", Upstream: "up"}}
+	var asked []string
+	var calls atomic.Int32
+	h := buildHooked(t, cfg, nil, func(name string) []hook.Hook {
+		asked = append(asked, name)
+		if name == "up" {
+			return []hook.Hook{marking(&calls)}
+		}
+		return nil
+	})
+	slices.Sort(asked)
+	if !slices.Equal(asked, []string{"other", "up"}) {
+		t.Errorf("asked for %q, want each upstream once", asked)
+	}
+	if rec := get(h, "/"); rec.Header().Get("X-Hooked") != "yes" {
+		t.Error("the hooked upstream's response skipped its hook")
+	}
+	if rec := get(h, "/b"); rec.Body.String() != "b" || rec.Header().Get("X-Hooked") != "" {
+		t.Errorf("got %q, X-Hooked %q; the other upstream must run no hook", rec.Body, rec.Header().Get("X-Hooked"))
+	}
+}
+
+func TestCacheHitSkipsHooks(t *testing.T) {
+	var backendCalls, hookCalls atomic.Int32
+	cfg := oneRoute(":8080", countingBackend(t, &backendCalls))
+	cfg.Upstreams[0].Cache = &config.UpstreamCache{Enabled: true}
+	h := buildHooked(t, cfg, cache.NewStore(1<<20, 1<<16), func(string) []hook.Hook {
+		return []hook.Hook{marking(&hookCalls)}
+	})
+	get(h, "/a")
+	get(h, "/a") // served from the cache
+	if backendCalls.Load() != 1 || hookCalls.Load() != 1 {
+		t.Errorf("backend %d, hook %d exchanges; want 1 and 1: hooks see only what reaches the upstream",
+			backendCalls.Load(), hookCalls.Load())
 	}
 }
