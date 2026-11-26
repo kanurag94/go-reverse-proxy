@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/config"
+	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 )
 
 func validConfig() *config.Config {

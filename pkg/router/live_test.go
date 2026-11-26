@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/cache"
-	"github.com/kanurag94/go-reverse-proxy/internal/config"
-	"github.com/kanurag94/go-reverse-proxy/internal/hook"
-	"github.com/kanurag94/go-reverse-proxy/internal/router"
+	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
+	"github.com/kanurag94/go-reverse-proxy/pkg/config"
+	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
+	"github.com/kanurag94/go-reverse-proxy/pkg/router"
 )
 
 func backend(t *testing.T, name string) string {

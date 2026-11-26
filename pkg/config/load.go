@@ -1,3 +1,5 @@
+// Package config is the proxy's configuration: listeners route hosts and paths
+// to upstreams. It is read from JSON strictly, or built in Go by an embedder.
 package config
 
 import (
@@ -10,6 +12,7 @@ import (
 	"time"
 )
 
+// Config is the whole configuration; Validate checks it.
 type Config struct {
 	Cache     *Cache     `json:"cache"`
 	Listeners []Listener `json:"listeners"`
@@ -23,6 +26,8 @@ type Cache struct {
 	MaxResponseSize int64 `json:"max_response_size"` // one stored response
 }
 
+// Listener accepts connections on Address, over TLS when it has certificates or
+// bumps, and routes its Hosts.
 type Listener struct {
 	Name    string `json:"name"`
 	Address string `json:"address"`
@@ -37,22 +42,26 @@ type Bump struct {
 	CADir string `json:"ca_dir"`
 }
 
+// Cert is a certificate and its key, as PEM files.
 type Cert struct {
 	CertFile string `json:"cert_file"`
 	KeyFile  string `json:"key_file"`
 }
 
+// Host routes requests for its Domains; the first route whose prefix covers the path wins.
 type Host struct {
 	Name    string   `json:"name"`
 	Domains []string `json:"domains"`
 	Routes  []Route  `json:"routes"`
 }
 
+// Route sends paths under Prefix to the upstream named Upstream.
 type Route struct {
 	Prefix   string `json:"prefix"`
 	Upstream string `json:"upstream"`
 }
 
+// Upstream is a named set of endpoints and how to reach them.
 type Upstream struct {
 	Name      string         `json:"name"`
 	Policy    string         `json:"policy"`
@@ -103,6 +112,7 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// UpstreamCache turns caching on for an upstream.
 type UpstreamCache struct {
 	Enabled bool `json:"enabled"`
 	// PrivateHeaders are request headers that identify a user, like Authorization
@@ -151,6 +161,7 @@ func (l Listener) BumpDir() string {
 	return l.Bump.CADir
 }
 
+// Load reads and parses the config file at path; it does not validate it.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -1,3 +1,5 @@
+// Package router assembles a config into handlers and serves the current one,
+// swapping in a new one atomically on reload.
 package router
 
 import (
@@ -9,13 +11,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/cache"
-	"github.com/kanurag94/go-reverse-proxy/internal/config"
-	"github.com/kanurag94/go-reverse-proxy/internal/hook"
 	"github.com/kanurag94/go-reverse-proxy/internal/proxy"
 	"github.com/kanurag94/go-reverse-proxy/internal/upstream"
+	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
+	"github.com/kanurag94/go-reverse-proxy/pkg/config"
+	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
 )
 
+// Snapshot is one config, assembled: each listener's routing, and the transports
+// whose idle connections close when it is replaced.
 type Snapshot struct {
 	listeners  map[string]listener
 	transports []*http.Transport
@@ -81,16 +85,19 @@ func Build(cfg *config.Config, store *cache.Store, opts Options) (*Snapshot, err
 	return s, nil
 }
 
+// Live serves the current Snapshot. Requests finish on the snapshot they began on.
 type Live struct {
 	current atomic.Pointer[Snapshot]
 }
 
+// NewLive serves s until a Swap.
 func NewLive(s *Snapshot) *Live {
 	l := &Live{}
 	l.current.Store(s)
 	return l
 }
 
+// Handler serves listener name's requests with whatever snapshot is current.
 func (l *Live) Handler(name string) (http.Handler, error) {
 	if _, ok := l.current.Load().listeners[name]; !ok {
 		return nil, fmt.Errorf("unknown listener %q", name)
@@ -107,6 +114,7 @@ func (l *Live) HasDomain(listener, host string) bool {
 	return ok && li.mux.HasDomain(host)
 }
 
+// Swap makes next current, unless it changes what listeners read only at start.
 func (l *Live) Swap(next *Snapshot) error {
 	if !sameListeners(l.current.Load(), next) {
 		return errors.New("listener changes need a restart")

@@ -51,6 +51,8 @@ type item struct {
 	size  int64
 }
 
+// NewStore holds up to maxBytes of responses, none larger than maxObjectBytes,
+// evicting the least recently used first.
 func NewStore(maxBytes, maxObjectBytes int64) *Store {
 	return &Store{
 		max:       maxBytes,

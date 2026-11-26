@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/pkg/accesslog"
 )
 
 func captureLog(t *testing.T) *bytes.Buffer {

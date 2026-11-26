@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/bump"
+	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
 )
 
 const helloTimeout = 10 * time.Second // how long a client may take to send its ClientHello
@@ -30,6 +30,8 @@ type Listener struct {
 // dialFunc opens a passthrough connection to its destination.
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
+// NewListener intercepts ln's connections, bumping the names bumps reports with
+// leaves signed by ca.
 func NewListener(ln net.Listener, ca *bump.CA, bumps func(name string) bool) *Listener {
 	return newListener(ln, ca, bumps, (&net.Dialer{Timeout: 5 * time.Second}).DialContext)
 }
@@ -92,6 +94,7 @@ func (l *Listener) destination(dst, sni string) string {
 	return net.JoinHostPort(sni, port)
 }
 
+// Accept returns the next bumped connection; it has not done its handshake yet.
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
 	case c := <-l.bumped:

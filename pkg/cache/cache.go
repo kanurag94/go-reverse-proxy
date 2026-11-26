@@ -1,3 +1,5 @@
+// Package cache stores shareable upstream responses in memory (RFC 9111) and
+// serves repeats from it, letting one request fetch for all its concurrent twins.
 package cache
 
 import (
@@ -10,6 +12,7 @@ import (
 
 const name = "go-reverse-proxy" // our identifier in Cache-Status (RFC 9211)
 
+// Handler serves cached responses for one upstream, and fetches through next otherwise.
 type Handler struct {
 	next     http.Handler
 	store    *Store
@@ -19,6 +22,8 @@ type Handler struct {
 	now      func() time.Time
 }
 
+// New caches next's responses in store under upstream's name. Responses to
+// requests carrying any of privateHeaders are stored only when marked shareable.
 func New(next http.Handler, store *Store, upstream string, privateHeaders []string) *Handler {
 	return &Handler{
 		next: next, store: store, flights: &group{inflight: make(map[string]*flight)},

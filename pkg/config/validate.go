@@ -9,6 +9,7 @@ import (
 	"strings"
 )
 
+// Validate reports the first problem in c, naming where it is.
 func (c *Config) Validate() error {
 	if len(c.Listeners) == 0 {
 		return errors.New("no listeners")
