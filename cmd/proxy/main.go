@@ -20,6 +20,7 @@ import (
 	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
+	"github.com/kanurag94/go-reverse-proxy/internal/intercept"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/internal/watch"
 )
@@ -68,15 +69,22 @@ func run(ctx context.Context, path string) error {
 			return err
 		}
 		srv := &http.Server{Handler: accesslog.New(h), ReadHeaderTimeout: 10 * time.Second}
-		if srv.TLSConfig, err = listenerTLS(l, live); err != nil {
-			return fmt.Errorf("listener %s: %w", l.Name, err)
+		if len(l.TLS) > 0 {
+			if srv.TLSConfig, err = tlsConfig(l.TLS); err != nil {
+				return fmt.Errorf("listener %s: %w", l.Name, err)
+			}
 		}
 		ln, err := net.Listen("tcp", l.Address)
 		if err != nil {
 			return err
 		}
+		if l.BumpDir() != "" {
+			if ln, err = intercepting(ln, l, live); err != nil {
+				return fmt.Errorf("listener %s: %w", l.Name, err)
+			}
+		}
 		servers = append(servers, srv)
-		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "tls", srv.TLSConfig != nil)
+		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "tls", len(l.TLS) > 0, "bump", l.BumpDir() != "")
 		go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, serve(srv, ln)) }()
 	}
 	select {
@@ -96,21 +104,15 @@ func serve(srv *http.Server, ln net.Listener) error {
 	return srv.Serve(ln)
 }
 
-// listenerTLS returns l's TLS config: its certificate files, or leaves minted per
-// name when it bumps; nil when it serves plain HTTP.
-func listenerTLS(l config.Listener, live *router.Live) (*tls.Config, error) {
-	switch {
-	case l.BumpDir() != "":
-		ca, err := bump.LoadOrCreate(l.BumpDir())
-		if err != nil {
-			return nil, fmt.Errorf("bump: %w", err)
-		}
-		slog.Info("bumping TLS; clients must trust the CA", "listener", l.Name, "ca", filepath.Join(l.BumpDir(), "ca.pem"))
-		return ca.TLSConfig(func(name string) bool { return live.HasDomain(l.Name, name) }), nil
-	case len(l.TLS) > 0:
-		return tlsConfig(l.TLS)
+// intercepting wraps ln so that l's configured names are bumped with l's CA and
+// every other connection passes through to where it was going.
+func intercepting(ln net.Listener, l config.Listener, live *router.Live) (net.Listener, error) {
+	ca, err := bump.LoadOrCreate(l.BumpDir())
+	if err != nil {
+		return nil, fmt.Errorf("bump: %w", err)
 	}
-	return nil, nil
+	slog.Info("bumping TLS; clients must trust the CA", "listener", l.Name, "ca", filepath.Join(l.BumpDir(), "ca.pem"))
+	return intercept.NewListener(ln, ca, func(name string) bool { return live.HasDomain(l.Name, name) }), nil
 }
 
 // tlsConfig loads a listener's certificates. With several, crypto/tls picks the one
