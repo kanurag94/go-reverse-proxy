@@ -33,6 +33,7 @@ type Listener struct {
 	Address string `json:"address"`
 	TLS     []Cert `json:"tls"`
 	Bump    *Bump  `json:"bump"`
+	Connect bool   `json:"connect"` // accept CONNECT requests from proxy clients
 	Hooks   []Hook `json:"hooks"`
 	Hosts   []Host `json:"hosts"`
 }

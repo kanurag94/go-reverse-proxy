@@ -173,6 +173,14 @@ func checkListener(l Listener, names map[string]bool, addrs map[string]string, u
 			return errors.New("bump: ca_dir is required")
 		}
 	}
+	if l.Connect {
+		switch {
+		case len(l.TLS) > 0:
+			return errors.New("connect and tls are exclusive")
+		case !loopback(l.Address):
+			return errors.New("connect: address must be loopback")
+		}
+	}
 	hooks := make(map[string]bool)
 	for i, h := range l.Hooks {
 		switch {
@@ -252,4 +260,10 @@ func checkRoute(r Route, earlier []Route, upstreams map[string]bool) error {
 // "/v1" covers "/v1" and "/v1/chat" but not "/v10".
 func Covers(prefix, path string) bool {
 	return prefix == "/" || path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+func loopback(addr string) bool {
+	host, _, _ := net.SplitHostPort(addr)
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }

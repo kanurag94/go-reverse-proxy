@@ -14,48 +14,63 @@ import (
 const helloTimeout = 10 * time.Second // how long a client may take to send its ClientHello
 
 // Listener reads each connection's ClientHello and bumps the ones for configured
-// names: Accept returns them as TLS server connections presenting a minted leaf,
-// for an http.Server to serve as usual. The rest pass through, byte for byte, to
-// where they were going. Closing it closes the real listener, which ends the
-// accept loop and with it Accept.
+// names: Accept returns them as TLS server connections presenting a minted leaf.
+// The rest pass through to where they were going. Connections come from a socket
+// (NewListener) or from a front end calling Handle (New).
 type Listener struct {
-	net.Listener // the real one
-	bumps        func(name string) bool
-	tls          *tls.Config
-	bumped       chan net.Conn
-	ctx          context.Context // done once the real listener is closed
-	dial         dialFunc
+	ln     net.Listener // nil when connections arrive only through Handle
+	bumps  func(name string) bool
+	tls    *tls.Config // nil: nothing is bumped
+	bumped chan net.Conn
+	ctx    context.Context
+	cancel context.CancelFunc
+	dial   dialFunc
 }
 
 // dialFunc opens a passthrough connection to its destination.
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
+// New returns a Listener fed only through Handle. With a nil ca nothing is bumped.
+func New(ca *bump.CA, bumps func(name string) bool) *Listener {
+	return newListener(nil, ca, bumps, defaultDial)
+}
+
 // NewListener intercepts ln's connections, bumping the names bumps reports with
 // leaves signed by ca.
 func NewListener(ln net.Listener, ca *bump.CA, bumps func(name string) bool) *Listener {
-	return newListener(ln, ca, bumps, (&net.Dialer{Timeout: 5 * time.Second}).DialContext)
+	return newListener(ln, ca, bumps, defaultDial)
 }
+
+var defaultDial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
 
 func newListener(ln net.Listener, ca *bump.CA, bumps func(name string) bool, dial dialFunc) *Listener {
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &Listener{Listener: ln, bumps: bumps, tls: ca.TLSConfig(bumps), bumped: make(chan net.Conn), ctx: ctx, dial: dial}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				cancel()
-				return
-			}
-			go l.decide(c, "") // a direct connection: no front end says where it was going
-		}
-	}()
+	l := &Listener{ln: ln, bumps: bumps, bumped: make(chan net.Conn), ctx: ctx, cancel: cancel, dial: dial}
+	if ca != nil {
+		l.tls = ca.TLSConfig(bumps)
+	}
+	if ln != nil {
+		go l.acceptLoop()
+	}
 	return l
+}
+
+func (l *Listener) acceptLoop() {
+	for {
+		c, err := l.ln.Accept()
+		if err != nil {
+			l.cancel()
+			return
+		}
+		go l.decide(c, "")
+	}
 }
 
 // Handle intercepts conn, which a front end (CONNECT, a transparent redirect)
 // knows was headed for dst: bumped, it comes out of Accept; otherwise it passes
-// through to dst. Logs and requests name conn.RemoteAddr() as the client, so a
-// front end that knows the original source wraps conn to report it.
+// through to dst. It returns once conn is closed. Logs and requests name
+// conn.RemoteAddr() as the client, so a front end that knows the original source
+// wraps conn to report it.
 func (l *Listener) Handle(conn net.Conn, dst string) { l.decide(conn, dst) }
 
 // decide bumps c when we want it and passes it through to dst otherwise.
@@ -72,6 +87,7 @@ func (l *Listener) decide(c net.Conn, dst string) {
 	slog.Info("connection", "mode", "bump", "client", c.RemoteAddr().String(), "sni", h.sni)
 	select {
 	case l.bumped <- tls.Server(replay, l.tls):
+		<-replay.closed
 	case <-l.ctx.Done():
 		c.Close()
 	}
@@ -81,7 +97,7 @@ func (l *Listener) decide(c net.Conn, dst string) {
 // HTTP (no ALPN at all means HTTP/1.1).
 func (l *Listener) wants(h hello) bool {
 	offersHTTP := len(h.protos) == 0 || slices.Contains(h.protos, "h2") || slices.Contains(h.protos, "http/1.1")
-	return h.sni != "" && offersHTTP && l.bumps(h.sni)
+	return l.tls != nil && h.sni != "" && offersHTTP && l.bumps(h.sni)
 }
 
 // destination is dst, or for a direct connection the SNI on our own port: the
@@ -102,4 +118,20 @@ func (l *Listener) Accept() (net.Conn, error) {
 	case <-l.ctx.Done():
 		return nil, net.ErrClosed
 	}
+}
+
+// Close stops Accept and closes the socket, if any.
+func (l *Listener) Close() error {
+	l.cancel()
+	if l.ln == nil {
+		return nil
+	}
+	return l.ln.Close()
+}
+
+func (l *Listener) Addr() net.Addr {
+	if l.ln == nil {
+		return &net.TCPAddr{}
+	}
+	return l.ln.Addr()
 }

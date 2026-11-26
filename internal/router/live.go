@@ -31,6 +31,7 @@ type listener struct {
 	address string
 	tls     []config.Cert // loaded once at startup, so a change needs a restart
 	bump    string        // the bump CA's dir, also loaded once at startup
+	connect bool
 	mux     *Mux
 	handler http.Handler // the mux behind the listener's plugin filters
 }
@@ -79,7 +80,7 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 		}
 		s.factories = append(s.factories, factories...)
 		mux := NewMux(hosts)
-		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, bump: l.BumpDir(), mux: mux,
+		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, bump: l.BumpDir(), connect: l.Connect, mux: mux,
 			handler: filterchain.New(mux, factories...)}
 	}
 	return s, nil
@@ -168,7 +169,7 @@ func sameListeners(a, b *Snapshot) bool {
 	}
 	for name, la := range a.listeners {
 		lb, ok := b.listeners[name]
-		if !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) || lb.bump != la.bump {
+		if !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) || lb.bump != la.bump || lb.connect != la.connect {
 			return false
 		}
 	}

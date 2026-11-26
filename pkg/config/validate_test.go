@@ -80,6 +80,11 @@ func TestValidateErrors(t *testing.T) {
 		{"bump with tls", func(c *config.Config) { listener(c).Bump = &config.Bump{CADir: "ca"} }, `listener "public": bump and tls are exclusive`},
 		{"bump without ca_dir", func(c *config.Config) { listener(c).TLS, listener(c).Bump = nil, &config.Bump{} }, `listener "public": bump: ca_dir is required`},
 		{"no hosts", func(c *config.Config) { listener(c).Hosts = nil }, `listener "public": no hosts`},
+		{"connect on a public address", func(c *config.Config) {
+			listener(c).TLS, listener(c).Connect, listener(c).Address = nil, true, "0.0.0.0:8080"
+		}, `listener "public": connect: address must be loopback`},
+		{"connect with tls", func(c *config.Config) { listener(c).Connect, listener(c).Address = true, "127.0.0.1:8080" },
+			`listener "public": connect and tls are exclusive`},
 		{"hook without name", func(c *config.Config) { listener(c).Hooks = []config.Hook{{}} }, `listener "public": hook 0: empty name`},
 		{"hook listed twice", func(c *config.Config) { listener(c).Hooks = []config.Hook{{Name: "x"}, {Name: "x"}} }, `listener "public": hook 1: "x" listed twice`},
 

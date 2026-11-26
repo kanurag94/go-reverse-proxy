@@ -307,3 +307,65 @@ func TestLogsEachConnection(t *testing.T) {
 			counts.MatchString(s) && strings.Contains(s, "mode=bump") && strings.Contains(s, "sni="+bumped)
 	}, "a passthrough line with destination and byte counts, and a bump line with the sni", log)
 }
+
+func TestListenerWithoutSocket(t *testing.T) {
+	ca, err := bump.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	il := New(ca, func(n string) bool { return n == bumped })
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "bumped") })}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(il) }()
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Cert())
+	server, client := net.Pipe()
+	go il.Handle(server, bumped+":443")
+	if got := over(t, client, roots, bumped); got != "bumped" {
+		t.Errorf("got %q, want bumped", got)
+	}
+	srv.Close()
+	if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve returned %v after Close", err)
+	}
+}
+
+func TestHandleReturnsWhenBumpedConnectionCloses(t *testing.T) {
+	ca, err := bump.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	il := New(ca, func(n string) bool { return n == bumped })
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "bumped") })}
+	go srv.Serve(il)
+	defer srv.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.Cert())
+	server, client := net.Pipe()
+	handled := make(chan struct{})
+	go func() { il.Handle(server, bumped+":443"); close(handled) }()
+	over(t, client, roots, bumped)
+	select {
+	case <-handled:
+		t.Fatal("Handle returned while the tunnel was still open")
+	default:
+	}
+	client.Close()
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handle did not return after the connection closed")
+	}
+}
+
+func TestWithoutCANothingIsBumped(t *testing.T) {
+	il := New(nil, func(string) bool { return true })
+	real, _ := realServer(t)
+	c := tls.Client(handle(t, il, real.Listener.Addr().String()), &tls.Config{ServerName: bumped, InsecureSkipVerify: true})
+	if err := c.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.ConnectionState().PeerCertificates[0].Equal(real.Certificate()) {
+		t.Error("a configured name was bumped without a CA")
+	}
+}

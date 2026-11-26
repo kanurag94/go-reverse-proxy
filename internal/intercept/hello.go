@@ -10,6 +10,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,7 +27,7 @@ var errProbed = errors.New("intercept: ClientHello read") // stops the probe han
 // client sees nothing. The returned conn replays the kept bytes first: whatever
 // comes next, our own handshake or a passthrough, sees the connection from its
 // first byte. Data that is not TLS gives an empty hello.
-func readHello(conn net.Conn, timeout time.Duration) (hello, net.Conn, error) {
+func readHello(conn net.Conn, timeout time.Duration) (hello, *replay, error) {
 	var h hello
 	var isTLS bool
 	rec := &recorder{Conn: conn}
@@ -41,7 +42,7 @@ func readHello(conn net.Conn, timeout time.Duration) (hello, net.Conn, error) {
 	if !isTLS && !errors.As(err, &notTLS) {
 		return hello{}, nil, err // silent past the deadline, or gone
 	}
-	return h, &replay{Conn: conn, r: io.MultiReader(bytes.NewReader(rec.buf.Bytes()), conn)}, nil
+	return h, &replay{Conn: conn, r: io.MultiReader(bytes.NewReader(rec.buf.Bytes()), conn), closed: make(chan struct{})}, nil
 }
 
 // recorder keeps what is read from its Conn and refuses writes, so the probe
@@ -61,10 +62,18 @@ func (r *recorder) Write([]byte) (int, error) {
 	return 0, errors.New("intercept: the probe writes nothing")
 }
 
-// replay reads the bytes the probe kept, then the rest of its Conn.
+// replay reads the bytes the probe kept, then the rest of its Conn. closed is
+// closed when it is.
 type replay struct {
 	net.Conn
-	r io.Reader
+	r      io.Reader
+	closed chan struct{}
+	once   sync.Once
 }
 
 func (c *replay) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+func (c *replay) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}

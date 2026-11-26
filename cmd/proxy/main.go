@@ -19,6 +19,7 @@ import (
 	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
 	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/connect"
 	"github.com/kanurag94/go-reverse-proxy/internal/intercept"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/internal/watch"
@@ -61,7 +62,7 @@ func run(ctx context.Context, path string) error {
 	}
 	defer stopWatch()
 
-	var servers []*http.Server
+	var servers []server
 	errs := make(chan error, len(cfg.Listeners))
 	for _, l := range cfg.Listeners {
 		h, err := live.Handler(l.Name)
@@ -77,6 +78,16 @@ func run(ctx context.Context, path string) error {
 		ln, err := net.Listen("tcp", l.Address)
 		if err != nil {
 			return err
+		}
+		if l.Connect {
+			cs, err := connecting(l, live, srv.Handler)
+			if err != nil {
+				return fmt.Errorf("listener %s: %w", l.Name, err)
+			}
+			servers = append(servers, cs)
+			slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "connect", true, "bump", l.BumpDir() != "")
+			go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, cs.Serve(ln)) }()
+			continue
 		}
 		if l.BumpDir() != "" {
 			if ln, err = intercepting(ln, l, live); err != nil {
@@ -107,13 +118,41 @@ func serve(srv *http.Server, ln net.Listener) error {
 // intercepting wraps ln so that l's configured names are bumped with l's CA and
 // every other connection passes through to where it was going.
 func intercepting(ln net.Listener, l config.Listener, live *router.Live) (net.Listener, error) {
+	ca, err := loadCA(l)
+	if err != nil {
+		return nil, err
+	}
+	return intercept.NewListener(ln, ca, bumps(l, live)), nil
+}
+
+// connecting is l's CONNECT front end, serving plain and bumped requests with h.
+func connecting(l config.Listener, live *router.Live, h http.Handler) (*connect.Server, error) {
+	var ca *bump.CA
+	if l.BumpDir() != "" {
+		var err error
+		if ca, err = loadCA(l); err != nil {
+			return nil, err
+		}
+	}
+	return connect.NewServer(ca, bumps(l, live), h), nil
+}
+
+func loadCA(l config.Listener) (*bump.CA, error) {
 	ca, err := bump.LoadOrCreate(l.BumpDir())
 	if err != nil {
 		return nil, fmt.Errorf("bump: %w", err)
 	}
 	slog.Info("bumping TLS; clients must trust the CA", "listener", l.Name, "ca", filepath.Join(l.BumpDir(), "ca.pem"))
-	return intercept.NewListener(ln, ca, func(name string) bool { return live.HasDomain(l.Name, name) }), nil
+	return ca, nil
 }
+
+// bumps reports whether l routes name, so only configured names are bumped.
+func bumps(l config.Listener, live *router.Live) func(name string) bool {
+	return func(name string) bool { return live.HasDomain(l.Name, name) }
+}
+
+// server is what shutdown stops: an http.Server or a connect.Server.
+type server interface{ Shutdown(context.Context) error }
 
 // tlsConfig loads a listener's certificates. With several, crypto/tls picks the one
 // matching the client's SNI, falling back to the first.
@@ -145,7 +184,7 @@ func reload(content []byte, store *cache.Store, live *router.Live) error {
 // shutdown stops every server from accepting connections and waits up to grace
 // for in-flight requests. All at once: one at a time, the others would keep
 // accepting while the first drains.
-func shutdown(servers []*http.Server, grace time.Duration) error {
+func shutdown(servers []server, grace time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 	errs := make([]error, len(servers))
