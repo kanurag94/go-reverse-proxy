@@ -4,11 +4,14 @@ package hook
 
 import "net/http"
 
-// Status is returned by headers callbacks.
+// Status is returned by headers callbacks. StopAndBuffer holds the message until
+// its whole body has arrived, then passes it to every filter in a single body
+// call; a filter may reply locally from that call.
 type Status int
 
 const (
 	Continue Status = iota
+	StopAndBuffer
 )
 
 // ConfigFactory is called when a listener using the plugin starts or reloads.

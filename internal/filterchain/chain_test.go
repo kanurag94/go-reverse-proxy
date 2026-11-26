@@ -331,3 +331,154 @@ func TestDroppedRequestLengthIsSentChunked(t *testing.T) {
 		t.Errorf("got %s, want a:-1: the upstream must see an unknown length", body)
 	}
 }
+
+type buffering struct {
+	hook.EmptyFilter
+	h       hook.Handle
+	request bool
+	inspect func(h hook.Handle, body []byte) []byte
+	calls   *callLog
+}
+
+func (b *buffering) OnRequestHeaders(http.Header, bool) hook.Status {
+	if b.request {
+		return hook.StopAndBuffer
+	}
+	return hook.Continue
+}
+
+func (b *buffering) OnRequestBody(body []byte, eos bool) []byte {
+	if !b.request {
+		return body
+	}
+	b.calls.add(fmt.Sprintf("req-body %q end=%v", body, eos))
+	return b.inspect(b.h, body)
+}
+
+func (b *buffering) OnResponseHeaders(int, http.Header, bool) hook.Status {
+	if b.request {
+		return hook.Continue
+	}
+	return hook.StopAndBuffer
+}
+
+func (b *buffering) OnResponseBody(body []byte, eos bool) []byte {
+	if b.request {
+		return body
+	}
+	b.calls.add(fmt.Sprintf("resp-body %q end=%v", body, eos))
+	return b.inspect(b.h, body)
+}
+
+func bufferingOn(request bool, log *callLog, inspect func(hook.Handle, []byte) []byte) *factory {
+	return &factory{make: func(h hook.Handle) hook.Filter {
+		return &buffering{h: h, request: request, inspect: inspect, calls: log}
+	}}
+}
+
+func keep(_ hook.Handle, b []byte) []byte { return b }
+
+func TestBufferedRequestBodyArrivesWhole(t *testing.T) {
+	log := &callLog{}
+	echo := func(w http.ResponseWriter, r *http.Request) { io.Copy(w, r.Body) }
+	pr, pw := io.Pipe()
+	go func() {
+		io.WriteString(pw, "hello ")
+		io.WriteString(pw, "world")
+		pw.Close()
+	}()
+	res, err := client.Post(serve(t, echo, bufferingOn(true, log, keep)), "text/plain", pr)
+	if _, body := read(t, res, err); body != "hello world" {
+		t.Errorf("upstream got %q, want hello world", body)
+	}
+	if got := log.all(); !slices.Equal(got, []string{`req-body "hello world" end=true`}) {
+		t.Errorf("calls %q, want one call with the whole body", got)
+	}
+}
+
+func TestBufferedRequestCanBeDenied(t *testing.T) {
+	var reached atomic.Bool
+	upstream := func(w http.ResponseWriter, r *http.Request) { reached.Store(true) }
+	deny := func(h hook.Handle, b []byte) []byte {
+		if strings.Contains(string(b), "secret") {
+			h.SendLocalReply(http.StatusForbidden, nil, []byte("denied"))
+		}
+		return b
+	}
+	res, body := post(t, serve(t, upstream, bufferingOn(true, &callLog{}, deny)), "my secret")
+	if res.StatusCode != http.StatusForbidden || body != "denied" || reached.Load() {
+		t.Errorf("got %d %q, upstream reached %v; want 403 denied, not reached", res.StatusCode, body, reached.Load())
+	}
+}
+
+func TestBufferedRequestRewriteSetsLength(t *testing.T) {
+	seen := func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, "%d %s", r.ContentLength, b)
+	}
+	rewrite := func(hook.Handle, []byte) []byte { return []byte("rewritten") }
+	if _, body := post(t, serve(t, seen, bufferingOn(true, &callLog{}, rewrite)), "x"); body != "9 rewritten" {
+		t.Errorf("upstream saw %q, want 9 rewritten", body)
+	}
+}
+
+func TestBufferedRequestTooLarge(t *testing.T) {
+	big := strings.Repeat("x", filterchain.MaxBufferedBody+1)
+	res, _ := post(t, serve(t, ok, bufferingOn(true, &callLog{}, keep)), big)
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status %d, want 413", res.StatusCode)
+	}
+}
+
+func TestBufferedResponseCanBeReplaced(t *testing.T) {
+	leaky := func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "a leak") }
+	redact := func(h hook.Handle, b []byte) []byte {
+		if strings.Contains(string(b), "leak") {
+			h.SendLocalReply(http.StatusForbidden, nil, []byte("redacted"))
+		}
+		return b
+	}
+	res, body := get(t, serve(t, leaky, bufferingOn(false, &callLog{}, redact))+"/")
+	if res.StatusCode != http.StatusForbidden || body != "redacted" {
+		t.Errorf("got %d %q, want 403 redacted", res.StatusCode, body)
+	}
+}
+
+func TestBufferedResponseArrivesWholeWithItsLength(t *testing.T) {
+	log := &callLog{}
+	chunks := func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "a")
+		http.NewResponseController(w).Flush()
+		io.WriteString(w, "b")
+	}
+	double := func(_ hook.Handle, b []byte) []byte { return append(b, b...) }
+	res, body := get(t, serve(t, chunks, bufferingOn(false, log, double))+"/")
+	if body != "abab" || res.ContentLength != 4 {
+		t.Errorf("got %q with length %d, want abab with length 4", body, res.ContentLength)
+	}
+	if got := log.all(); !slices.Equal(got, []string{`resp-body "ab" end=true`}) {
+		t.Errorf("calls %q, want one call with the whole body", got)
+	}
+}
+
+func TestBufferedResponseTooLarge(t *testing.T) {
+	huge := func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Repeat("x", filterchain.MaxBufferedBody+1))
+	}
+	res, _ := get(t, serve(t, huge, bufferingOn(false, &callLog{}, keep))+"/")
+	if res.StatusCode != http.StatusBadGateway {
+		t.Errorf("status %d, want 502", res.StatusCode)
+	}
+}
+
+func TestBufferedResponseReplacesUpstreamLength(t *testing.T) {
+	sized := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		io.WriteString(w, "ab")
+	}
+	double := func(_ hook.Handle, b []byte) []byte { return append(b, b...) }
+	res, body := get(t, serve(t, sized, bufferingOn(false, &callLog{}, double))+"/")
+	if body != "abab" || res.ContentLength != 4 {
+		t.Errorf("got %q with length %d, want abab with length 4", body, res.ContentLength)
+	}
+}
