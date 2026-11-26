@@ -7,23 +7,27 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/config"
+	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 )
 
+// Route sends paths under Prefix to Handler.
 type Route struct {
 	Prefix  string
 	Handler http.Handler
 }
 
+// Host is the routes for a set of domains, tried in order.
 type Host struct {
 	Domains []string
 	Routes  []Route
 }
 
+// Mux routes a request by its host, then the first route covering its path.
 type Mux struct {
 	hosts map[string][]Route
 }
 
+// NewMux routes hosts.
 func NewMux(hosts []Host) *Mux {
 	m := &Mux{hosts: make(map[string][]Route)}
 	for _, h := range hosts {
@@ -49,6 +53,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// HasDomain reports whether m routes host (any port and case ignored).
 func (m *Mux) HasDomain(host string) bool {
 	_, ok := m.hosts[hostname(host)]
 	return ok

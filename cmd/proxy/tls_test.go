@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/config"
+	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 )
 
 // writeCert writes a self-signed certificate for name and its key as PEM files in dir.

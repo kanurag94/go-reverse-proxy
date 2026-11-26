@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/bump"
+	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
 )
 
 const bumped = "api.example.test" // the one name these listeners bump

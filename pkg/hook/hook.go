@@ -43,6 +43,7 @@ type ImmediateResponse struct {
 // one is answered 413.
 const MaxBufferedBody = 32 << 20
 
+// New runs the hooks' processors around every exchange next serves.
 func New(next http.Handler, hooks ...Hook) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var ps []*Processor

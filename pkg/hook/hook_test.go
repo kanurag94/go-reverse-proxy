@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/internal/hook"
+	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
 )
 
 var client = &http.Client{Timeout: 5 * time.Second}

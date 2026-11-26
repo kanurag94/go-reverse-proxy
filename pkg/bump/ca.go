@@ -55,6 +55,7 @@ func LoadOrCreate(dir string) (*CA, error) {
 	return &CA{cert: pair.Leaf, key: key, leafKey: leafKey, now: time.Now, leaves: make(map[string]*tls.Certificate)}, nil
 }
 
+// Cert is the CA certificate clients must trust.
 func (c *CA) Cert() *x509.Certificate { return c.cert }
 
 // create writes a new self-signed CA. The key goes first, so a crash between the

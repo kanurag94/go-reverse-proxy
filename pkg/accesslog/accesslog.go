@@ -1,3 +1,5 @@
+// Package accesslog logs one line per request: what was asked, what was answered,
+// how long it took and whether it finished.
 package accesslog
 
 import (
@@ -8,6 +10,7 @@ import (
 	"time"
 )
 
+// New logs every request next serves, once it is done.
 func New(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
