@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -66,8 +68,27 @@ type Host struct {
 
 // Route sends paths under Prefix to the upstream named Upstream.
 type Route struct {
-	Prefix   string `json:"prefix"`
-	Upstream string `json:"upstream"`
+	Prefix   string        `json:"prefix"`
+	Methods  []string      `json:"methods"` // empty: any method
+	Headers  []HeaderMatch `json:"headers"` // every one must match
+	Upstream string        `json:"upstream"`
+}
+
+// HeaderMatch requires a request header: equal to Value, or present when Value
+// is "". Names are case-insensitive; values are not.
+type HeaderMatch struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Matches reports whether h meets m. Header.Values puts the name in canonical
+// form, so its case does not matter.
+func (m HeaderMatch) Matches(h http.Header) bool {
+	values := h.Values(m.Name)
+	if m.Value == "" {
+		return len(values) > 0
+	}
+	return slices.Contains(values, m.Value)
 }
 
 // Upstream is a named set of endpoints and how to reach them.

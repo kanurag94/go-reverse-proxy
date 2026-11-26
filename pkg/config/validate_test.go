@@ -119,6 +119,22 @@ func TestValidateErrors(t *testing.T) {
 			host(c).Routes = []config.Route{{Prefix: "/v1", Upstream: "api"}, {Prefix: "/v1", Upstream: "api"}}
 		}, `route "/v1": unreachable, covered by "/v1"`},
 		{"unknown upstream", func(c *config.Config) { host(c).Routes[0].Upstream = "nope" }, `route "/v1": unknown upstream "nope"`},
+		{"lowercase method", func(c *config.Config) { host(c).Routes[0].Methods = []string{"post"} },
+			`route "/v1": method "post" must be uppercase`},
+		{"header match without name", func(c *config.Config) { host(c).Routes[0].Headers = []config.HeaderMatch{{}} },
+			`route "/v1": header 0: empty name`},
+		{"broader methods hide a route", func(c *config.Config) {
+			host(c).Routes = []config.Route{{Prefix: "/v1", Methods: []string{"GET", "POST"}, Upstream: "api"},
+				{Prefix: "/v1/x", Methods: []string{"GET"}, Upstream: "api"}}
+		}, `route "/v1/x": unreachable, covered by "/v1"`},
+		{"header presence hides a value", func(c *config.Config) {
+			host(c).Routes = []config.Route{{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "X-Canary"}}, Upstream: "api"},
+				{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "X-Canary", Value: "true"}}, Upstream: "api"}}
+		}, `route "/v1": unreachable, covered by "/v1"`},
+		{"header presence hides a value in another case", func(c *config.Config) {
+			host(c).Routes = []config.Route{{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "x-canary"}}, Upstream: "api"},
+				{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "X-Canary", Value: "true"}}, Upstream: "api"}}
+		}, `route "/v1": unreachable, covered by "/v1"`},
 
 		{"upstream without name", func(c *config.Config) { upstream(c).Name = "" }, "upstream 0: empty name"},
 		{"duplicate upstream name", func(c *config.Config) { c.Upstreams[1].Name = "api" }, `upstream "api": duplicate name`},
@@ -198,6 +214,22 @@ func TestCacheEnabled(t *testing.T) {
 	for _, tt := range tests {
 		if got := (config.Upstream{Cache: tt.cache}).CacheEnabled(); got != tt.want {
 			t.Errorf("%s: CacheEnabled() = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestValidateConditionedRoutesStayReachable(t *testing.T) {
+	for name, routes := range map[string][]config.Route{
+		"method then catch-all": {{Prefix: "/v1", Methods: []string{"POST"}, Upstream: "api"}, {Prefix: "/v1", Upstream: "api"}},
+		"different header values": {{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "X-Canary", Value: "true"}}, Upstream: "api"},
+			{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "X-Canary", Value: "false"}}, Upstream: "api"}},
+		"narrower methods first": {{Prefix: "/v1", Methods: []string{"GET"}, Upstream: "api"},
+			{Prefix: "/v1", Methods: []string{"GET", "POST"}, Upstream: "api"}},
+	} {
+		c := validConfig()
+		host(c).Routes = routes
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }

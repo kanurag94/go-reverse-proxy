@@ -2,11 +2,13 @@ package router_test
 
 import (
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
+	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 )
 
 func named(name string) http.Handler {
@@ -84,6 +86,41 @@ func TestMuxRouting(t *testing.T) {
 			}
 			if tt.wantBody != "" && rec.Body.String() != tt.wantBody {
 				t.Errorf("routed to %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestMuxMatchesMethodsAndHeaders(t *testing.T) {
+	m := router.NewMux([]router.Host{{
+		Domains: []string{"api.example.com"},
+		Routes: []router.Route{
+			{Prefix: "/v1", Methods: []string{"POST"}, Handler: named("writes")},
+			{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "x-canary", Value: "true"}}, Handler: named("canary")},
+			{Prefix: "/v1", Headers: []config.HeaderMatch{{Name: "X-Debug"}}, Handler: named("debug")},
+			{Prefix: "/", Handler: named("root")},
+		},
+	}})
+	tests := []struct {
+		name, method string
+		header       http.Header
+		want         string
+	}{
+		{"method matches", http.MethodPost, nil, "writes"},
+		{"header value matches", http.MethodGet, http.Header{"X-Canary": {"true"}}, "canary"},
+		{"header name in any case", http.MethodGet, http.Header{http.CanonicalHeaderKey("X-CANARY"): {"true"}}, "canary"},
+		{"header value differs", http.MethodGet, http.Header{"X-Canary": {"false"}}, "root"},
+		{"header present", http.MethodGet, http.Header{"X-Debug": {"anything"}}, "debug"},
+		{"no condition met", http.MethodGet, nil, "root"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(tt.method, "http://api.example.com/v1/items", nil)
+			maps.Copy(r.Header, tt.header)
+			rec := httptest.NewRecorder()
+			m.ServeHTTP(rec, r)
+			if got := rec.Body.String(); got != tt.want {
+				t.Errorf("routed to %q, want %q", got, tt.want)
 			}
 		})
 	}

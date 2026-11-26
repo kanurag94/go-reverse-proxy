@@ -546,3 +546,23 @@ func TestFailedBuildDestroysOtherListenersFactories(t *testing.T) {
 		t.Errorf("err = %v, destroyed %d; want the first listener's factory destroyed", err, d.Load())
 	}
 }
+
+func TestBuildRoutesByMethod(t *testing.T) {
+	cfg := oneRoute(":8080", backend(t, "reads"))
+	cfg.Upstreams = append(cfg.Upstreams, config.Upstream{Name: "writes", Endpoints: []string{backend(t, "writes")}})
+	cfg.Listeners[0].Hosts[0].Routes = []config.Route{
+		{Prefix: "/", Methods: []string{"POST"}, Upstream: "writes"},
+		{Prefix: "/", Upstream: "up"},
+	}
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+	post := httptest.NewRequest(http.MethodPost, "/", nil)
+	post.Host = "api.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, post)
+	if got := rec.Body.String(); got != "writes" {
+		t.Errorf("POST went to %q, want writes", got)
+	}
+	if got := get(h, "/").Body.String(); got != "reads" {
+		t.Errorf("GET went to %q, want reads", got)
+	}
+}

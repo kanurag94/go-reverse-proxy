@@ -69,7 +69,7 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 		for _, h := range l.Hosts {
 			var routes []Route
 			for _, r := range h.Routes {
-				routes = append(routes, Route{Prefix: r.Prefix, Handler: handlers[r.Upstream]})
+				routes = append(routes, Route{Prefix: r.Prefix, Methods: r.Methods, Headers: r.Headers, Handler: handlers[r.Upstream]})
 			}
 			hosts = append(hosts, Host{Domains: h.Domains, Routes: routes})
 		}

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -255,12 +257,48 @@ func checkRoute(r Route, earlier []Route, upstreams map[string]bool) error {
 	case !upstreams[r.Upstream]:
 		return fmt.Errorf("unknown upstream %q", r.Upstream)
 	}
+	for _, m := range r.Methods {
+		if m == "" || m != strings.ToUpper(m) {
+			return fmt.Errorf("method %q must be uppercase", m)
+		}
+	}
+	for i, h := range r.Headers {
+		if h.Name == "" {
+			return fmt.Errorf("header %d: empty name", i)
+		}
+		if err := checkHeaderName(h.Name); err != nil {
+			return fmt.Errorf("header %d: %w", i, err)
+		}
+	}
 	for _, e := range earlier {
-		if Covers(e.Prefix, r.Prefix) {
+		if Covers(e.Prefix, r.Prefix) && acceptsAll(e, r) {
 			return fmt.Errorf("unreachable, covered by %q", e.Prefix)
 		}
 	}
 	return nil
+}
+
+// acceptsAll reports whether e accepts every request r does: e allows all of r's
+// methods (or any method), and r requires each header e requires.
+func acceptsAll(e, r Route) bool {
+	if len(e.Methods) > 0 && (len(r.Methods) == 0 || !subset(r.Methods, e.Methods)) {
+		return false
+	}
+	for _, eh := range e.Headers {
+		if !slices.ContainsFunc(r.Headers, func(rh HeaderMatch) bool { return rh.implies(eh) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// implies reports whether every request meeting m also meets o.
+func (m HeaderMatch) implies(o HeaderMatch) bool {
+	return http.CanonicalHeaderKey(m.Name) == http.CanonicalHeaderKey(o.Name) && (o.Value == "" || o.Value == m.Value)
+}
+
+func subset(a, b []string) bool {
+	return !slices.ContainsFunc(a, func(s string) bool { return !slices.Contains(b, s) })
 }
 
 // Covers reports whether prefix matches path on a segment boundary:
