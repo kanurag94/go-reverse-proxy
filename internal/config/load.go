@@ -27,7 +27,14 @@ type Listener struct {
 	Name    string `json:"name"`
 	Address string `json:"address"`
 	TLS     []Cert `json:"tls"`
+	Bump    *Bump  `json:"bump"`
 	Hosts   []Host `json:"hosts"`
+}
+
+// Bump terminates TLS with certificates minted on the fly for the listener's
+// domains, signed by the CA in CADir (created there on first start).
+type Bump struct {
+	CADir string `json:"ca_dir"`
 }
 
 type Cert struct {
@@ -53,6 +60,7 @@ type Upstream struct {
 	Health    Health         `json:"health"`
 	Timeouts  Timeouts       `json:"timeouts"`
 	Retries   Retries        `json:"retries"`
+	TLS       *UpstreamTLS   `json:"tls"`
 	Cache     *UpstreamCache `json:"cache"`
 }
 
@@ -72,6 +80,11 @@ type Timeouts struct {
 // Zero means the default of 2; 1 turns retries off.
 type Retries struct {
 	Attempts int `json:"attempts"`
+}
+
+// UpstreamTLS verifies the endpoints against the PEM roots in CAFile instead of the system's.
+type UpstreamTLS struct {
+	CAFile string `json:"ca_file"`
 }
 
 // Duration is a time.Duration written in JSON as a string such as "10s" or "1m30s".
@@ -120,6 +133,22 @@ func (c *Config) CacheLimits() (maxSize, maxResponseSize int64) {
 // its config says so explicitly.
 func (u Upstream) CacheEnabled() bool {
 	return u.Cache != nil && u.Cache.Enabled
+}
+
+// CAFile is the file of roots u's endpoints are verified against; "" means the system's.
+func (u Upstream) CAFile() string {
+	if u.TLS == nil {
+		return ""
+	}
+	return u.TLS.CAFile
+}
+
+// BumpDir is the CA dir of a bumping listener; "" means it does not bump.
+func (l Listener) BumpDir() string {
+	if l.Bump == nil {
+		return ""
+	}
+	return l.Bump.CADir
 }
 
 func Load(path string) (*Config, error) {

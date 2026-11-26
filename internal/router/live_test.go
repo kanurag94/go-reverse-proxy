@@ -132,6 +132,11 @@ func TestSwapRejectsListenerChanges(t *testing.T) {
 	if err := live.Swap(mustBuild(t, secured)); err == nil {
 		t.Fatal("Swap accepted changed certificates; they are loaded once, at startup")
 	}
+	bumped := oneRoute(":8080", backend(t, "new"))
+	bumped.Listeners[0].Bump = &config.Bump{CADir: "ca"}
+	if err := live.Swap(mustBuild(t, bumped)); err == nil {
+		t.Fatal("Swap accepted a changed bump CA; it is loaded once, at startup")
+	}
 	if got := get(h, "/").Body.String(); got != "old" {
 		t.Errorf("a rejected swap changed routing: went to %q", got)
 	}
@@ -376,5 +381,28 @@ func TestSwapClosesOldIdleConnections(t *testing.T) {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the replaced snapshot's idle connection is still open")
+	}
+}
+
+func TestHasDomain(t *testing.T) {
+	live := router.NewLive(mustBuild(t, oneRoute(":8080", backend(t, "a"))))
+	if !live.HasDomain("public", "api.example.com") || live.HasDomain("public", "other.example.com") {
+		t.Fatal("HasDomain disagrees with the configured domains")
+	}
+	more := oneRoute(":8080", backend(t, "a"))
+	more.Listeners[0].Hosts[0].Domains = append(more.Listeners[0].Hosts[0].Domains, "other.example.com")
+	if err := live.Swap(mustBuild(t, more)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.HasDomain("public", "other.example.com") {
+		t.Error("HasDomain did not see the domain a reload added")
+	}
+}
+
+func TestBuildRejectsMissingCAFile(t *testing.T) {
+	cfg := oneRoute(":8080", backend(t, "a"))
+	cfg.Upstreams[0].TLS = &config.UpstreamTLS{CAFile: "/nonexistent/ca.pem"}
+	if _, err := router.Build(cfg, nil); err == nil || !strings.Contains(err.Error(), `upstream "up": tls:`) {
+		t.Errorf("err = %v, want it to name upstream \"up\" tls", err)
 	}
 }

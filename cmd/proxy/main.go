@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
@@ -66,10 +68,8 @@ func run(ctx context.Context, path string) error {
 			return err
 		}
 		srv := &http.Server{Handler: accesslog.New(h), ReadHeaderTimeout: 10 * time.Second}
-		if len(l.TLS) > 0 {
-			if srv.TLSConfig, err = tlsConfig(l.TLS); err != nil {
-				return fmt.Errorf("listener %s: %w", l.Name, err)
-			}
+		if srv.TLSConfig, err = listenerTLS(l, live); err != nil {
+			return fmt.Errorf("listener %s: %w", l.Name, err)
 		}
 		ln, err := net.Listen("tcp", l.Address)
 		if err != nil {
@@ -94,6 +94,23 @@ func serve(srv *http.Server, ln net.Listener) error {
 		return srv.ServeTLS(ln, "", "")
 	}
 	return srv.Serve(ln)
+}
+
+// listenerTLS returns l's TLS config: its certificate files, or leaves minted per
+// name when it bumps; nil when it serves plain HTTP.
+func listenerTLS(l config.Listener, live *router.Live) (*tls.Config, error) {
+	switch {
+	case l.BumpDir() != "":
+		ca, err := bump.LoadOrCreate(l.BumpDir())
+		if err != nil {
+			return nil, fmt.Errorf("bump: %w", err)
+		}
+		slog.Info("bumping TLS; clients must trust the CA", "listener", l.Name, "ca", filepath.Join(l.BumpDir(), "ca.pem"))
+		return ca.TLSConfig(func(name string) bool { return live.HasDomain(l.Name, name) }), nil
+	case len(l.TLS) > 0:
+		return tlsConfig(l.TLS)
+	}
+	return nil, nil
 }
 
 // tlsConfig loads a listener's certificates. With several, crypto/tls picks the one

@@ -2,6 +2,7 @@ package accesslog_test
 
 import (
 	"bytes"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
@@ -133,4 +134,18 @@ func TestLogsSwitchedProtocolAs101(t *testing.T) {
 	<-done
 
 	assertLogged(t, log.String(), "status=101")
+}
+
+func TestLogsTLS(t *testing.T) {
+	log := captureLog(t)
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/", nil)
+	req.TLS = &tls.ConnectionState{ServerName: "api.example.test", NegotiatedProtocol: "h2"}
+	accesslog.New(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	assertLogged(t, log.String(), "sni=api.example.test", "alpn=h2")
+
+	log.Reset()
+	serve(func(http.ResponseWriter, *http.Request) {}, "/")
+	if strings.Contains(log.String(), "sni=") {
+		t.Errorf("plain request logged TLS fields: %q", log)
+	}
 }
