@@ -11,6 +11,7 @@ import (
 
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/config"
+	"github.com/kanurag94/go-reverse-proxy/internal/hook"
 	"github.com/kanurag94/go-reverse-proxy/internal/proxy"
 	"github.com/kanurag94/go-reverse-proxy/internal/upstream"
 )
@@ -27,10 +28,18 @@ type listener struct {
 	mux     *Mux
 }
 
+// Options are what an embedder adds to what the config says.
+type Options struct {
+	// Hooks returns the hooks to run on an upstream's exchanges, inside its
+	// cache: they see only what reaches the upstream. Build asks once per
+	// upstream, so a reload asks again. nil, or no hooks, means none.
+	Hooks func(upstream string) []hook.Hook
+}
+
 // Build validates cfg and assembles its handlers, with one Transport per upstream.
 // store holds cached responses; passing the same one to every Build keeps the
 // cache across reloads.
-func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
+func Build(cfg *config.Config, store *cache.Store, opts Options) (*Snapshot, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -50,6 +59,9 @@ func Build(cfg *config.Config, store *cache.Store) (*Snapshot, error) {
 		}
 		health := upstream.Health{MaxFailures: u.Health.MaxFailures, EjectDuration: time.Duration(u.Health.EjectDuration)}
 		var h http.Handler = proxy.New(upstream.NewPool(eps, u.Policy, health, u.Retries.Attempts))
+		if opts.Hooks != nil {
+			h = hook.New(h, opts.Hooks(u.Name)...)
+		}
 		if u.CacheEnabled() {
 			h = cache.New(h, store, u.Name, u.Cache.PrivateHeaders)
 		}
