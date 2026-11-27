@@ -369,3 +369,52 @@ func TestWithoutCANothingIsBumped(t *testing.T) {
 		t.Error("a configured name was bumped without a CA")
 	}
 }
+
+// toward is a connection that knows where its client was going, as one read
+// from a PROXY protocol header does.
+type toward struct {
+	net.Conn
+	dst string
+}
+
+func (c toward) Destination() string { return c.dst }
+
+type redirecting struct {
+	net.Listener
+	dst string
+}
+
+func (l redirecting) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return toward{c, l.dst}, nil
+}
+
+func TestRedirectedConnectionPassesThroughToItsDestination(t *testing.T) {
+	ca, err := bump.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialed := make(chan string, 1)
+	il := newListener(redirecting{raw, "160.79.104.10:443"}, ca, func(n string) bool { return n == bumped },
+		func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed <- addr
+			return nil, errors.New("not dialing in a test")
+		})
+	t.Cleanup(func() { il.Close() })
+	go get(raw.Addr().String(), nil, "other.example.test", true)
+	select {
+	case got := <-dialed:
+		if got != "160.79.104.10:443" {
+			t.Errorf("dialed %q, want the connection's destination 160.79.104.10:443", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("never dialed")
+	}
+}

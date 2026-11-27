@@ -85,6 +85,12 @@ func TestValidateErrors(t *testing.T) {
 		}, `listener "public": connect: address must be loopback`},
 		{"connect with tls", func(c *config.Config) { listener(c).Connect, listener(c).Address = true, "127.0.0.1:8080" },
 			`listener "public": connect and tls are exclusive`},
+		{"proxy_protocol on a public address", func(c *config.Config) {
+			listener(c).ProxyProtocol, listener(c).Address = true, "0.0.0.0:8080"
+		}, `listener "public": proxy_protocol: address must be loopback`},
+		{"proxy_protocol with connect", func(c *config.Config) {
+			listener(c).TLS, listener(c).Connect, listener(c).ProxyProtocol, listener(c).Address = nil, true, true, "127.0.0.1:8080"
+		}, `listener "public": connect and proxy_protocol are exclusive`},
 		{"dns refresh too often", func(c *config.Config) { upstream(c).DNSRefresh = config.Duration(100 * time.Millisecond) },
 			`upstream "api": dns_refresh must be at least 1s`},
 		{"h2c with an https endpoint", func(c *config.Config) { c.Upstreams[1].H2C = true },

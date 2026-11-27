@@ -81,7 +81,7 @@ func (l *Listener) decide(c net.Conn, dst string) {
 		return
 	}
 	if !l.wants(h) {
-		l.passThrough(replay, l.destination(dst, h.sni), h.sni)
+		l.passThrough(replay, l.destination(c, dst, h.sni), h.sni)
 		return
 	}
 	slog.Info("connection", "mode", "bump", "client", c.RemoteAddr().String(), "sni", h.sni)
@@ -100,11 +100,22 @@ func (l *Listener) wants(h hello) bool {
 	return l.tls != nil && h.sni != "" && offersHTTP && l.bumps(h.sni)
 }
 
-// destination is dst, or for a direct connection the SNI on our own port: the
-// client resolved that name to us, so it meant that port on the real host.
-func (l *Listener) destination(dst, sni string) string {
-	if dst != "" || sni == "" {
+// redirected is a connection that knows where its client was going, such as one
+// whose PROXY protocol header said so.
+type redirected interface{ Destination() string }
+
+// destination is where to pass c through to: dst from a front end, else where c
+// says its client was going, else for a direct connection the SNI on our own
+// port: the client resolved that name to us, so it meant that port on the real host.
+func (l *Listener) destination(c net.Conn, dst, sni string) string {
+	if dst != "" {
 		return dst
+	}
+	if r, ok := c.(redirected); ok && r.Destination() != "" {
+		return r.Destination()
+	}
+	if sni == "" {
+		return ""
 	}
 	_, port, _ := net.SplitHostPort(l.Addr().String())
 	return net.JoinHostPort(sni, port)

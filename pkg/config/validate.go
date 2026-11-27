@@ -190,9 +190,14 @@ func checkListener(l Listener, names map[string]bool, addrs map[string]string, u
 		switch {
 		case len(l.TLS) > 0:
 			return errors.New("connect and tls are exclusive")
+		case l.ProxyProtocol:
+			return errors.New("connect and proxy_protocol are exclusive")
 		case !loopback(l.Address):
 			return errors.New("connect: address must be loopback")
 		}
+	}
+	if l.ProxyProtocol && !loopback(l.Address) {
+		return errors.New("proxy_protocol: address must be loopback") // the header is trusted as sent
 	}
 	hooks := make(map[string]bool)
 	for i, h := range l.Hooks {

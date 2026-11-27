@@ -36,6 +36,7 @@ type listener struct {
 	tls     []config.Cert // loaded once at startup, so a change needs a restart
 	bump    string        // the bump CA's dir, also loaded once at startup
 	connect bool
+	proxy   bool // proxy_protocol, which wraps the socket at startup
 	mux     *Mux
 	handler http.Handler // the mux behind the listener's plugin filters
 }
@@ -100,7 +101,7 @@ func build(ctx context.Context, cfg *config.Config, store *cache.Store) (*Snapsh
 		}
 		s.factories = append(s.factories, factories...)
 		mux := NewMux(hosts)
-		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, bump: l.BumpDir(), connect: l.Connect, mux: mux,
+		s.listeners[l.Name] = listener{address: l.Address, tls: l.TLS, bump: l.BumpDir(), connect: l.Connect, proxy: l.ProxyProtocol, mux: mux,
 			handler: filterchain.New(mux, factories...)}
 	}
 	return s, nil
@@ -203,7 +204,7 @@ func sameListeners(a, b *Snapshot) bool {
 	}
 	for name, la := range a.listeners {
 		lb, ok := b.listeners[name]
-		if !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) || lb.bump != la.bump || lb.connect != la.connect {
+		if !ok || lb.address != la.address || !slices.Equal(lb.tls, la.tls) || lb.bump != la.bump || lb.connect != la.connect || lb.proxy != la.proxy {
 			return false
 		}
 	}

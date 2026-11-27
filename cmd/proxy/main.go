@@ -21,6 +21,7 @@ import (
 	"github.com/kanurag94/go-reverse-proxy/internal/cache"
 	"github.com/kanurag94/go-reverse-proxy/internal/connect"
 	"github.com/kanurag94/go-reverse-proxy/internal/intercept"
+	"github.com/kanurag94/go-reverse-proxy/internal/proxyproto"
 	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/internal/watch"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
@@ -103,6 +104,9 @@ func listen(l config.Listener, ln net.Listener, live *router.Live, srv *http.Ser
 		return nil, err
 	}
 	bumps := func(name string) bool { return live.HasDomain(l.Name, name) }
+	if l.ProxyProtocol {
+		ln = proxyproto.NewListener(ln)
+	}
 	switch {
 	case l.Connect:
 		tunnels := intercept.New(ca, bumps)

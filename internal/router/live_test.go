@@ -595,3 +595,12 @@ func TestRejectedSwapReleasesTheSnapshot(t *testing.T) {
 		t.Errorf("destroyed %d factories of the rejected snapshot, want 1", d.Load())
 	}
 }
+
+func TestSwapRejectsAChangedProxyProtocol(t *testing.T) {
+	live := router.NewLive(mustBuild(t, oneRoute("127.0.0.1:8080", backend(t, "old"))))
+	redirected := oneRoute("127.0.0.1:8080", backend(t, "new"))
+	redirected.Listeners[0].ProxyProtocol = true
+	if err := live.Swap(mustBuild(t, redirected)); err == nil {
+		t.Fatal("Swap accepted proxy_protocol turned on; it applies to the socket, at startup")
+	}
+}

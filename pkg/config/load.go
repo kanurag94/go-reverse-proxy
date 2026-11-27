@@ -36,8 +36,11 @@ type Listener struct {
 	TLS     []Cert `json:"tls"`
 	Bump    *Bump  `json:"bump"`
 	Connect bool   `json:"connect"` // accept CONNECT requests from proxy clients
-	Hooks   []Hook `json:"hooks"`
-	Hosts   []Host `json:"hosts"`
+	// ProxyProtocol: each connection starts with a PROXY protocol v2 header from a
+	// local redirector, naming the client and where it was going.
+	ProxyProtocol bool   `json:"proxy_protocol"`
+	Hooks         []Hook `json:"hooks"`
+	Hosts         []Host `json:"hosts"`
 }
 
 // Hook names a registered plugin to run on a listener, in list order. Config is
