@@ -13,6 +13,8 @@ import (
 // Route sends paths under Prefix to Handler.
 type Route struct {
 	Prefix  string
+	Methods []string             // empty: any method
+	Headers []config.HeaderMatch // every one must match
 	Handler http.Handler
 }
 
@@ -45,7 +47,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, rt := range m.hosts[hostname(r.Host)] {
-		if config.Covers(rt.Prefix, r.URL.Path) {
+		if rt.matches(r) {
 			rt.Handler.ServeHTTP(w, r)
 			return
 		}
@@ -57,6 +59,21 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *Mux) HasDomain(host string) bool {
 	_, ok := m.hosts[hostname(host)]
 	return ok
+}
+
+func (rt Route) matches(r *http.Request) bool {
+	if !config.Covers(rt.Prefix, r.URL.Path) {
+		return false
+	}
+	if len(rt.Methods) > 0 && !slices.Contains(rt.Methods, r.Method) {
+		return false
+	}
+	for _, h := range rt.Headers {
+		if !h.Matches(r.Header) {
+			return false
+		}
+	}
+	return true
 }
 
 func hostname(host string) string {

@@ -1,6 +1,9 @@
 package upstream_test
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -8,7 +11,7 @@ import (
 )
 
 func TestNewTransportDefaults(t *testing.T) {
-	tr, err := upstream.NewTransport(upstream.Timeouts{}, "")
+	tr, err := upstream.NewTransport(upstream.Timeouts{}, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,11 +33,42 @@ func TestNewTransportDefaults(t *testing.T) {
 }
 
 func TestNewTransportUsesTimeouts(t *testing.T) {
-	tr, err := upstream.NewTransport(upstream.Timeouts{Connect: time.Second, ResponseHeader: 10 * time.Minute}, "")
+	tr, err := upstream.NewTransport(upstream.Timeouts{Connect: time.Second, ResponseHeader: 10 * time.Minute}, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tr.ResponseHeaderTimeout != 10*time.Minute {
 		t.Errorf("ResponseHeaderTimeout = %v, want 10m", tr.ResponseHeaderTimeout)
+	}
+}
+
+func protoServer(t *testing.T) string {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, r.Proto)
+	}))
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetHTTP1(true)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestH2CTransport(t *testing.T) {
+	url := protoServer(t)
+	for h2c, want := range map[bool]string{true: "HTTP/2.0", false: "HTTP/1.1"} {
+		tr, err := upstream.NewTransport(upstream.Timeouts{}, "", h2c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := (&http.Client{Transport: tr}).Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if string(b) != want {
+			t.Errorf("h2c=%v: upstream saw %s, want %s", h2c, b, want)
+		}
 	}
 }

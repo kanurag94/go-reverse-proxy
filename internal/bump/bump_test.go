@@ -10,7 +10,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
+	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 )
 
 func newCA(t *testing.T) *bump.CA {

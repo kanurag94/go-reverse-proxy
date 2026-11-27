@@ -24,8 +24,9 @@ const (
 
 // NewTransport returns the HTTP client for one upstream: Go's default Transport
 // with the settings a proxy needs. It verifies endpoints against the roots in
-// caFile, or the system's when caFile is "".
-func NewTransport(t Timeouts, caFile string) (*http.Transport, error) {
+// caFile, or the system's when caFile is "". With h2c it speaks HTTP/2 without
+// TLS to http:// endpoints.
+func NewTransport(t Timeouts, caFile string, h2c bool) (*http.Transport, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil               // never send upstream traffic through $HTTP_PROXY
 	tr.DisableCompression = true // pass Accept-Encoding through as the client sent it
@@ -41,6 +42,10 @@ func NewTransport(t Timeouts, caFile string) (*http.Transport, error) {
 			return nil, err
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: roots} // still verified; HTTP/2 stays on
+	}
+	if h2c {
+		tr.Protocols = new(http.Protocols)
+		tr.Protocols.SetUnencryptedHTTP2(true) // without HTTP1, http:// requests use HTTP/2 with prior knowledge
 	}
 	return tr, nil
 }

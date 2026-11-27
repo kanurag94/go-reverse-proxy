@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -33,7 +35,19 @@ type Listener struct {
 	Address string `json:"address"`
 	TLS     []Cert `json:"tls"`
 	Bump    *Bump  `json:"bump"`
-	Hosts   []Host `json:"hosts"`
+	Connect bool   `json:"connect"` // accept CONNECT requests from proxy clients
+	// ProxyProtocol: each connection starts with a PROXY protocol v2 header from a
+	// local redirector, naming the client and where it was going.
+	ProxyProtocol bool   `json:"proxy_protocol"`
+	Hooks         []Hook `json:"hooks"`
+	Hosts         []Host `json:"hosts"`
+}
+
+// Hook names a registered plugin to run on a listener, in list order. Config is
+// passed to the plugin unparsed.
+type Hook struct {
+	Name   string          `json:"name"`
+	Config json.RawMessage `json:"config"`
 }
 
 // Bump terminates TLS with certificates minted on the fly for the listener's
@@ -57,20 +71,41 @@ type Host struct {
 
 // Route sends paths under Prefix to the upstream named Upstream.
 type Route struct {
-	Prefix   string `json:"prefix"`
-	Upstream string `json:"upstream"`
+	Prefix   string        `json:"prefix"`
+	Methods  []string      `json:"methods"` // empty: any method
+	Headers  []HeaderMatch `json:"headers"` // every one must match
+	Upstream string        `json:"upstream"`
+}
+
+// HeaderMatch requires a request header: equal to Value, or present when Value
+// is "". Names are case-insensitive; values are not.
+type HeaderMatch struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Matches reports whether h meets m. Header.Values puts the name in canonical
+// form, so its case does not matter.
+func (m HeaderMatch) Matches(h http.Header) bool {
+	values := h.Values(m.Name)
+	if m.Value == "" {
+		return len(values) > 0
+	}
+	return slices.Contains(values, m.Value)
 }
 
 // Upstream is a named set of endpoints and how to reach them.
 type Upstream struct {
-	Name      string         `json:"name"`
-	Policy    string         `json:"policy"`
-	Endpoints []string       `json:"endpoints"`
-	Health    Health         `json:"health"`
-	Timeouts  Timeouts       `json:"timeouts"`
-	Retries   Retries        `json:"retries"`
-	TLS       *UpstreamTLS   `json:"tls"`
-	Cache     *UpstreamCache `json:"cache"`
+	Name       string         `json:"name"`
+	Policy     string         `json:"policy"`
+	Endpoints  []string       `json:"endpoints"`
+	Health     Health         `json:"health"`
+	Timeouts   Timeouts       `json:"timeouts"`
+	Retries    Retries        `json:"retries"`
+	H2C        bool           `json:"h2c"`
+	DNSRefresh Duration       `json:"dns_refresh"` // set: one member per resolved address, looked up again this often // speak HTTP/2 without TLS to the endpoints, which must be http://
+	TLS        *UpstreamTLS   `json:"tls"`
+	Cache      *UpstreamCache `json:"cache"`
 }
 
 // Health tunes passive health checking. Zero values mean the defaults.

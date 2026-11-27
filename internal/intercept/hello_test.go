@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
+	"github.com/kanurag94/go-reverse-proxy/internal/bump"
 )
 
 // client starts a TLS handshake on its end of a pipe and returns the other end.

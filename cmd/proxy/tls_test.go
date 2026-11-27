@@ -95,3 +95,21 @@ func TestTLSMissingCertFile(t *testing.T) {
 		t.Errorf("err = %v, want it to name tls 1 and gone.crt", err)
 	}
 }
+
+func TestTLSListenerSpeaksH2(t *testing.T) {
+	dir := t.TempDir()
+	c, cert := writeCert(t, dir, "a.local")
+	addr := serveListener(t, config.Listener{Name: "secure", TLS: []config.Cert{c}}, nil,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, r.Proto) }))
+	roots := x509.NewCertPool()
+	roots.AddCert(cert)
+	tr := &http.Transport{TLSClientConfig: &tls.Config{ServerName: "a.local", RootCAs: roots}, ForceAttemptHTTP2: true}
+	res, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get("https://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if b, _ := io.ReadAll(res.Body); string(b) != "HTTP/2.0" {
+		t.Errorf("served over %s, want HTTP/2.0", b)
+	}
+}

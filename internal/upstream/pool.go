@@ -27,12 +27,13 @@ const (
 // anything else rotates over the healthy ones. An attempt that cannot reach its
 // endpoint is retried on another, up to attempts in all, when that is safe.
 type Pool struct {
-	members  []*member
-	failover bool
-	health   Health
-	attempts int
-	next     atomic.Uint64
-	now      func() time.Time
+	configured []*Endpoint
+	members    atomic.Pointer[[]*member] // replaced whole when DNS changes
+	failover   bool
+	health     Health
+	attempts   int
+	next       atomic.Uint64
+	now        func() time.Time
 }
 
 type member struct {
@@ -51,18 +52,48 @@ func NewPool(endpoints []*Endpoint, policy string, health Health, attempts int) 
 	if attempts <= 0 {
 		attempts = defaultAttempts
 	}
-	p := &Pool{failover: policy == "failover", health: health, attempts: attempts, now: time.Now}
-	for _, e := range endpoints {
-		p.members = append(p.members, &member{Endpoint: e})
-	}
+	p := &Pool{configured: endpoints, failover: policy == "failover", health: health, attempts: attempts, now: time.Now}
+	p.Update(endpoints)
 	return p
+}
+
+// Update replaces the pool's endpoints. One the pool already has keeps its
+// member, and so its health; dropped ones close their idle connections.
+func (p *Pool) Update(endpoints []*Endpoint) {
+	old := make(map[string]*member)
+	if current := p.members.Load(); current != nil {
+		for _, m := range *current {
+			old[m.key()] = m
+		}
+	}
+	members := make([]*member, len(endpoints))
+	for i, e := range endpoints {
+		if m, ok := old[e.key()]; ok {
+			members[i] = m
+			delete(old, e.key())
+		} else {
+			members[i] = &member{Endpoint: e}
+		}
+	}
+	p.members.Store(&members)
+	for _, m := range old {
+		m.CloseIdleConnections()
+	}
+}
+
+// CloseIdleConnections closes the idle connections of every member.
+func (p *Pool) CloseIdleConnections() {
+	for _, m := range *p.members.Load() {
+		m.CloseIdleConnections()
+	}
 }
 
 func (p *Pool) RoundTrip(r *http.Request) (*http.Response, error) {
 	body := newReplayBody(r.Body)
+	members := *p.members.Load() // one list for the whole request, even if DNS changes it
 	tried := make(map[*member]bool)
 	for {
-		m := p.pick(tried)
+		m := p.pick(members, tried)
 		tried[m] = true
 		var sent atomic.Bool
 		attempt := r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
@@ -76,7 +107,7 @@ func (p *Pool) RoundTrip(r *http.Request) (*http.Response, error) {
 		if err == nil {
 			return res, nil
 		}
-		if len(tried) == min(p.attempts, len(p.members)) || !retryable(r, body, sent.Load()) {
+		if len(tried) == min(p.attempts, len(members)) || !retryable(r, body, sent.Load()) {
 			if body != nil {
 				body.rc.Close() // no attempt is left to close it
 			}
@@ -90,10 +121,10 @@ func (p *Pool) RoundTrip(r *http.Request) (*http.Response, error) {
 // pick chooses among the healthy endpoints this request has not tried yet. If none
 // is healthy it chooses among all untried ones: trying one beats failing without
 // an attempt.
-func (p *Pool) pick(tried map[*member]bool) *member {
+func (p *Pool) pick(members []*member, tried map[*member]bool) *member {
 	now := p.now().UnixNano()
 	var healthy, untried []*member
-	for _, m := range p.members {
+	for _, m := range members {
 		if tried[m] {
 			continue
 		}

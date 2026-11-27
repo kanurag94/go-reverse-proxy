@@ -16,13 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kanurag94/go-reverse-proxy/internal/accesslog"
+	"github.com/kanurag94/go-reverse-proxy/internal/bump"
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/connect"
+	"github.com/kanurag94/go-reverse-proxy/internal/intercept"
+	"github.com/kanurag94/go-reverse-proxy/internal/proxyproto"
+	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/internal/watch"
-	"github.com/kanurag94/go-reverse-proxy/pkg/accesslog"
-	"github.com/kanurag94/go-reverse-proxy/pkg/bump"
-	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
-	"github.com/kanurag94/go-reverse-proxy/pkg/intercept"
-	"github.com/kanurag94/go-reverse-proxy/pkg/router"
 )
 
 func main() {
@@ -44,7 +46,7 @@ func run(ctx context.Context, path string) error {
 		return err
 	}
 	store := cache.NewStore(cfg.CacheLimits()) // one store for the process, shared by every snapshot
-	snap, err := router.Build(cfg, store, router.Options{})
+	snap, err := router.Build(cfg, store)
 	if err != nil {
 		return err
 	}
@@ -62,63 +64,92 @@ func run(ctx context.Context, path string) error {
 	defer stopWatch()
 
 	var servers []*http.Server
-	errs := make(chan error, len(cfg.Listeners))
+	errs := make(chan error, 2*len(cfg.Listeners))
 	for _, l := range cfg.Listeners {
 		h, err := live.Handler(l.Name)
 		if err != nil {
 			return err
 		}
-		srv := &http.Server{Handler: accesslog.New(h), ReadHeaderTimeout: 10 * time.Second}
-		if len(l.TLS) > 0 {
-			if srv.TLSConfig, err = tlsConfig(l.TLS); err != nil {
-				return fmt.Errorf("listener %s: %w", l.Name, err)
-			}
-		}
+		srv := httpServer(accesslog.New(h))
 		ln, err := net.Listen("tcp", l.Address)
 		if err != nil {
 			return err
 		}
-		if l.BumpDir() != "" {
-			if ln, err = intercepting(ln, l, live); err != nil {
-				return fmt.Errorf("listener %s: %w", l.Name, err)
-			}
+		sockets, err := listen(l, ln, live, srv)
+		if err != nil {
+			return fmt.Errorf("listener %s: %w", l.Name, err)
 		}
 		servers = append(servers, srv)
-		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String(), "tls", len(l.TLS) > 0, "bump", l.BumpDir() != "")
-		go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, serve(srv, ln)) }()
+		slog.Info("listening", "listener", l.Name, "address", ln.Addr().String())
+		for _, s := range sockets {
+			go func() { errs <- fmt.Errorf("listener %s: %w", l.Name, srv.Serve(s)) }()
+		}
 	}
 	select {
 	case err := <-errs:
 		return err
 	case <-ctx.Done():
 		slog.Info("shutting down")
-		return shutdown(servers, 30*time.Second)
+		err := shutdown(servers, 30*time.Second)
+		live.Close()
+		return err
 	}
 }
 
-// serve serves ln, over TLS when srv has a TLS config. ServeTLS also turns on HTTP/2.
-func serve(srv *http.Server, ln net.Listener) error {
-	if srv.TLSConfig != nil {
-		return srv.ServeTLS(ln, "", "")
+// listen returns the sockets srv serves for l: ln itself, ln wrapped for TLS or
+// bumping, or for a CONNECT listener ln plus the tunnels it bumps.
+func listen(l config.Listener, ln net.Listener, live *router.Live, srv *http.Server) ([]net.Listener, error) {
+	ca, err := loadCA(l)
+	if err != nil {
+		return nil, err
 	}
-	return srv.Serve(ln)
+	bumps := func(name string) bool { return live.HasDomain(l.Name, name) }
+	if l.ProxyProtocol {
+		ln = proxyproto.NewListener(ln)
+	}
+	switch {
+	case l.Connect:
+		tunnels := intercept.New(ca, bumps)
+		srv.Handler = connect.Handler(srv.Handler, tunnels)
+		return []net.Listener{ln, tunnels}, nil
+	case ca != nil:
+		return []net.Listener{intercept.NewListener(ln, ca, bumps)}, nil
+	case len(l.TLS) > 0:
+		cfg, err := tlsConfig(l.TLS)
+		if err != nil {
+			return nil, err
+		}
+		return []net.Listener{tls.NewListener(ln, cfg)}, nil
+	}
+	return []net.Listener{ln}, nil
 }
 
-// intercepting wraps ln so that l's configured names are bumped with l's CA and
-// every other connection passes through to where it was going.
-func intercepting(ln net.Listener, l config.Listener, live *router.Live) (net.Listener, error) {
+// httpServer serves h over HTTP/1, h2 (on TLS connections) and h2c.
+func httpServer(h http.Handler) *http.Server {
+	p := new(http.Protocols)
+	p.SetHTTP1(true)
+	p.SetHTTP2(true)
+	p.SetUnencryptedHTTP2(true)
+	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, Protocols: p}
+}
+
+// loadCA loads the CA of a bumping listener, creating it on first use; nil when l does not bump.
+func loadCA(l config.Listener) (*bump.CA, error) {
+	if l.BumpDir() == "" {
+		return nil, nil
+	}
 	ca, err := bump.LoadOrCreate(l.BumpDir())
 	if err != nil {
 		return nil, fmt.Errorf("bump: %w", err)
 	}
 	slog.Info("bumping TLS; clients must trust the CA", "listener", l.Name, "ca", filepath.Join(l.BumpDir(), "ca.pem"))
-	return intercept.NewListener(ln, ca, func(name string) bool { return live.HasDomain(l.Name, name) }), nil
+	return ca, nil
 }
 
 // tlsConfig loads a listener's certificates. With several, crypto/tls picks the one
 // matching the client's SNI, falling back to the first.
 func tlsConfig(certs []config.Cert) (*tls.Config, error) {
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}
 	for i, c := range certs {
 		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 		if err != nil {
@@ -135,7 +166,7 @@ func reload(content []byte, store *cache.Store, live *router.Live) error {
 	if err != nil {
 		return err
 	}
-	snap, err := router.Build(cfg, store, router.Options{})
+	snap, err := router.Build(cfg, store)
 	if err != nil {
 		return err
 	}

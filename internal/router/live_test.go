@@ -1,6 +1,9 @@
 package router_test
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -12,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kanurag94/go-reverse-proxy/pkg/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/cache"
+	"github.com/kanurag94/go-reverse-proxy/internal/router"
 	"github.com/kanurag94/go-reverse-proxy/pkg/config"
 	"github.com/kanurag94/go-reverse-proxy/pkg/hook"
-	"github.com/kanurag94/go-reverse-proxy/pkg/router"
 )
 
 func backend(t *testing.T, name string) string {
@@ -49,7 +52,7 @@ func mustBuild(t *testing.T, cfg *config.Config) *router.Snapshot {
 
 func mustBuildWith(t *testing.T, cfg *config.Config, store *cache.Store) *router.Snapshot {
 	t.Helper()
-	s, err := router.Build(cfg, store, router.Options{})
+	s, err := router.Build(cfg, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +94,7 @@ func TestBuildRoutesToUpstreams(t *testing.T) {
 }
 
 func TestBuildValidates(t *testing.T) {
-	if _, err := router.Build(&config.Config{}, nil, router.Options{}); err == nil {
+	if _, err := router.Build(&config.Config{}, nil); err == nil {
 		t.Fatal("Build accepted a config with no listeners")
 	}
 }
@@ -403,77 +406,201 @@ func TestHasDomain(t *testing.T) {
 func TestBuildRejectsMissingCAFile(t *testing.T) {
 	cfg := oneRoute(":8080", backend(t, "a"))
 	cfg.Upstreams[0].TLS = &config.UpstreamTLS{CAFile: "/nonexistent/ca.pem"}
-	if _, err := router.Build(cfg, nil, router.Options{}); err == nil || !strings.Contains(err.Error(), `upstream "up": tls:`) {
+	if _, err := router.Build(cfg, nil); err == nil || !strings.Contains(err.Error(), `upstream "up": tls:`) {
 		t.Errorf("err = %v, want it to name upstream \"up\" tls", err)
 	}
 }
 
-// marking is a hook that sets X-Hooked on responses and counts the exchanges it starts.
-func marking(calls *atomic.Int32) hook.Hook {
-	return func(*http.Request) *hook.Processor {
-		calls.Add(1)
-		return &hook.Processor{OnResponseHeaders: func(_ int, h http.Header) *hook.ImmediateResponse {
-			h.Set("X-Hooked", "yes")
-			return nil
-		}}
+var seq atomic.Int64
+
+func register(t *testing.T, p hook.ConfigFactory) string {
+	name := fmt.Sprintf("%s-%d", t.Name(), seq.Add(1))
+	hook.Register(name, p)
+	return name
+}
+
+type plugin func(listener string, config []byte) (hook.FilterFactory, error)
+
+func (p plugin) Create(l string, c []byte) (hook.FilterFactory, error) { return p(l, c) }
+
+type filters struct {
+	make      func(hook.Handle) hook.Filter
+	destroyed *atomic.Int32
+}
+
+func (f filters) Create(h hook.Handle) hook.Filter { return f.make(h) }
+func (f filters) OnDestroy()                       { f.destroyed.Add(1) }
+
+type tagger struct {
+	hook.EmptyFilter
+	tag string
+}
+
+func (t tagger) OnRequestHeaders(h http.Header, _ bool) hook.Status {
+	h.Add("X-Order", t.tag)
+	return hook.Continue
+}
+
+func tagging(tag string, destroyed *atomic.Int32) plugin {
+	return func(string, []byte) (hook.FilterFactory, error) {
+		return filters{make: func(hook.Handle) hook.Filter { return tagger{tag: tag} }, destroyed: destroyed}, nil
 	}
 }
 
-func buildHooked(t *testing.T, cfg *config.Config, store *cache.Store, hooks func(string) []hook.Hook) http.Handler {
+func withHooks(cfg *config.Config, names ...string) *config.Config {
+	for _, n := range names {
+		cfg.Listeners[0].Hooks = append(cfg.Listeners[0].Hooks, config.Hook{Name: n})
+	}
+	return cfg
+}
+
+func orderBackend(t *testing.T) string {
 	t.Helper()
-	s, err := router.Build(cfg, store, router.Options{Hooks: hooks})
-	if err != nil {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Join(r.Header.Values("X-Order"), ","))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestListenerHooksRunInOrder(t *testing.T) {
+	var d atomic.Int32
+	first, second := register(t, tagging("first", &d)), register(t, tagging("second", &d))
+	h := mustHandler(t, router.NewLive(mustBuild(t, withHooks(oneRoute(":8080", orderBackend(t)), first, second))), "public")
+	if got := get(h, "/").Body.String(); got != "first,second" {
+		t.Errorf("upstream saw %q, want first,second", got)
+	}
+}
+
+func TestHookGetsListenerAndConfig(t *testing.T) {
+	var gotListener, gotConfig string
+	name := register(t, plugin(func(l string, c []byte) (hook.FilterFactory, error) {
+		gotListener, gotConfig = l, string(c)
+		return filters{make: func(hook.Handle) hook.Filter { return nil }, destroyed: new(atomic.Int32)}, nil
+	}))
+	cfg := oneRoute(":8080", backend(t, "a"))
+	cfg.Listeners[0].Hooks = []config.Hook{{Name: name, Config: json.RawMessage(`{"level":"debug"}`)}}
+	mustBuild(t, cfg)
+	if gotListener != "public" || gotConfig != `{"level":"debug"}` {
+		t.Errorf("plugin got listener %q, config %q", gotListener, gotConfig)
+	}
+}
+
+func TestHooksRunBeforeRouting(t *testing.T) {
+	name := register(t, plugin(func(string, []byte) (hook.FilterFactory, error) {
+		return filters{destroyed: new(atomic.Int32), make: func(h hook.Handle) hook.Filter {
+			h.Request().URL.Path = "/b"
+			return hook.EmptyFilter{}
+		}}, nil
+	}))
+	cfg := oneRoute(":8080", backend(t, "a"))
+	cfg.Upstreams = append(cfg.Upstreams, config.Upstream{Name: "b", Endpoints: []string{backend(t, "b")}})
+	cfg.Listeners[0].Hosts[0].Routes = []config.Route{{Prefix: "/b", Upstream: "b"}, {Prefix: "/", Upstream: "up"}}
+	h := mustHandler(t, router.NewLive(mustBuild(t, withHooks(cfg, name))), "public")
+	if got := get(h, "/").Body.String(); got != "b" {
+		t.Errorf("routed to %q, want b: hooks run before the route is chosen", got)
+	}
+}
+
+func TestUnknownHookIsRejected(t *testing.T) {
+	_, err := router.Build(withHooks(oneRoute(":8080", backend(t, "a")), "never-registered"), nil)
+	if err == nil || !strings.Contains(err.Error(), `listener "public": hook 0 "never-registered": not registered`) {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestFailedBuildDestroysCreatedFactories(t *testing.T) {
+	var d atomic.Int32
+	ok := register(t, tagging("ok", &d))
+	broken := register(t, plugin(func(string, []byte) (hook.FilterFactory, error) { return nil, errors.New("bad config") }))
+	_, err := router.Build(withHooks(oneRoute(":8080", backend(t, "a")), ok, broken), nil)
+	if err == nil || !strings.Contains(err.Error(), "bad config") || d.Load() != 1 {
+		t.Errorf("err = %v, destroyed %d; want the error and the earlier factory destroyed", err, d.Load())
+	}
+}
+
+func TestReloadDestroysOldFactories(t *testing.T) {
+	var oldD, newD atomic.Int32
+	old, current := register(t, tagging("old", &oldD)), register(t, tagging("new", &newD))
+	live := router.NewLive(mustBuild(t, withHooks(oneRoute(":8080", orderBackend(t)), old)))
+	if err := live.Swap(mustBuild(t, withHooks(oneRoute(":8080", orderBackend(t)), current))); err != nil {
 		t.Fatal(err)
 	}
-	return mustHandler(t, router.NewLive(s), "public")
-}
-
-func TestBuildAppliesHooks(t *testing.T) {
-	var calls atomic.Int32
-	h := buildHooked(t, oneRoute(":8080", backend(t, "a")), nil, func(string) []hook.Hook {
-		return []hook.Hook{marking(&calls)}
-	})
-	if rec := get(h, "/"); rec.Body.String() != "a" || rec.Header().Get("X-Hooked") != "yes" {
-		t.Errorf("got %q, X-Hooked %q; want a, through the hook", rec.Body, rec.Header().Get("X-Hooked"))
+	if oldD.Load() != 1 || newD.Load() != 0 {
+		t.Errorf("destroyed old %d, new %d; want 1 and 0", oldD.Load(), newD.Load())
+	}
+	if got := get(mustHandler(t, live, "public"), "/").Body.String(); got != "new" {
+		t.Errorf("after reload the upstream saw %q, want new", got)
 	}
 }
 
-func TestHooksAreChosenPerUpstream(t *testing.T) {
-	cfg := oneRoute(":8080", backend(t, "a"))
-	cfg.Upstreams = append(cfg.Upstreams, config.Upstream{Name: "other", Endpoints: []string{backend(t, "b")}})
-	cfg.Listeners[0].Hosts[0].Routes = []config.Route{{Prefix: "/b", Upstream: "other"}, {Prefix: "/", Upstream: "up"}}
-	var asked []string
-	var calls atomic.Int32
-	h := buildHooked(t, cfg, nil, func(name string) []hook.Hook {
-		asked = append(asked, name)
-		if name == "up" {
-			return []hook.Hook{marking(&calls)}
+func TestFailedBuildDestroysOtherListenersFactories(t *testing.T) {
+	var d atomic.Int32
+	ok := register(t, tagging("ok", &d))
+	broken := register(t, plugin(func(string, []byte) (hook.FilterFactory, error) { return nil, errors.New("bad config") }))
+	cfg := withHooks(oneRoute(":8080", backend(t, "a")), ok)
+	second := cfg.Listeners[0]
+	second.Name, second.Address, second.Hooks = "second", ":8081", []config.Hook{{Name: broken}}
+	cfg.Listeners = append(cfg.Listeners, second)
+	if _, err := router.Build(cfg, nil); err == nil || d.Load() != 1 {
+		t.Errorf("err = %v, destroyed %d; want the first listener's factory destroyed", err, d.Load())
+	}
+}
+
+func TestBuildRoutesByMethod(t *testing.T) {
+	cfg := oneRoute(":8080", backend(t, "reads"))
+	cfg.Upstreams = append(cfg.Upstreams, config.Upstream{Name: "writes", Endpoints: []string{backend(t, "writes")}})
+	cfg.Listeners[0].Hosts[0].Routes = []config.Route{
+		{Prefix: "/", Methods: []string{"POST"}, Upstream: "writes"},
+		{Prefix: "/", Upstream: "up"},
+	}
+	h := mustHandler(t, router.NewLive(mustBuild(t, cfg)), "public")
+	post := httptest.NewRequest(http.MethodPost, "/", nil)
+	post.Host = "api.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, post)
+	if got := rec.Body.String(); got != "writes" {
+		t.Errorf("POST went to %q, want writes", got)
+	}
+	if got := get(h, "/").Body.String(); got != "reads" {
+		t.Errorf("GET went to %q, want reads", got)
+	}
+}
+
+// localhost resolves to 127.0.0.1 and ::1, and the backend listens on one of
+// them: the other is ejected and every request still arrives.
+func TestDNSUpstreamServesEveryAddress(t *testing.T) {
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(backend(t, "a"), "http://"))
+	cfg := oneRoute(":8080", "http://localhost:"+port)
+	cfg.Upstreams[0].DNSRefresh = config.Duration(time.Second)
+	live := router.NewLive(mustBuild(t, cfg))
+	t.Cleanup(func() { live.Swap(mustBuild(t, oneRoute(":8080", backend(t, "b")))) })
+	h := mustHandler(t, live, "public")
+	for range 4 {
+		if got := get(h, "/").Body.String(); got != "a" {
+			t.Fatalf("got %q, want a", got)
 		}
-		return nil
-	})
-	slices.Sort(asked)
-	if !slices.Equal(asked, []string{"other", "up"}) {
-		t.Errorf("asked for %q, want each upstream once", asked)
-	}
-	if rec := get(h, "/"); rec.Header().Get("X-Hooked") != "yes" {
-		t.Error("the hooked upstream's response skipped its hook")
-	}
-	if rec := get(h, "/b"); rec.Body.String() != "b" || rec.Header().Get("X-Hooked") != "" {
-		t.Errorf("got %q, X-Hooked %q; the other upstream must run no hook", rec.Body, rec.Header().Get("X-Hooked"))
 	}
 }
 
-func TestCacheHitSkipsHooks(t *testing.T) {
-	var backendCalls, hookCalls atomic.Int32
-	cfg := oneRoute(":8080", countingBackend(t, &backendCalls))
-	cfg.Upstreams[0].Cache = &config.UpstreamCache{Enabled: true}
-	h := buildHooked(t, cfg, cache.NewStore(1<<20, 1<<16), func(string) []hook.Hook {
-		return []hook.Hook{marking(&hookCalls)}
-	})
-	get(h, "/a")
-	get(h, "/a") // served from the cache
-	if backendCalls.Load() != 1 || hookCalls.Load() != 1 {
-		t.Errorf("backend %d, hook %d exchanges; want 1 and 1: hooks see only what reaches the upstream",
-			backendCalls.Load(), hookCalls.Load())
+func TestRejectedSwapReleasesTheSnapshot(t *testing.T) {
+	var d atomic.Int32
+	name := register(t, tagging("x", &d))
+	live := router.NewLive(mustBuild(t, oneRoute(":8080", backend(t, "a"))))
+	moved := withHooks(oneRoute(":9090", backend(t, "b")), name)
+	if err := live.Swap(mustBuild(t, moved)); err == nil {
+		t.Fatal("Swap accepted a changed listener address")
+	}
+	if d.Load() != 1 {
+		t.Errorf("destroyed %d factories of the rejected snapshot, want 1", d.Load())
+	}
+}
+
+func TestSwapRejectsAChangedProxyProtocol(t *testing.T) {
+	live := router.NewLive(mustBuild(t, oneRoute("127.0.0.1:8080", backend(t, "old"))))
+	redirected := oneRoute("127.0.0.1:8080", backend(t, "new"))
+	redirected.Listeners[0].ProxyProtocol = true
+	if err := live.Swap(mustBuild(t, redirected)); err == nil {
+		t.Fatal("Swap accepted proxy_protocol turned on; it applies to the socket, at startup")
 	}
 }

@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Validate reports the first problem in c, naming where it is.
@@ -59,6 +62,16 @@ func checkUpstream(u Upstream, seen map[string]bool) error {
 	for i, e := range u.Endpoints {
 		if err := checkEndpoint(e); err != nil {
 			return fmt.Errorf("endpoint %d: %w", i, err)
+		}
+	}
+	if d := time.Duration(u.DNSRefresh); d != 0 && d < time.Second {
+		return errors.New("dns_refresh must be at least 1s")
+	}
+	if u.H2C {
+		for i, e := range u.Endpoints {
+			if ep, _ := url.Parse(e); ep.Scheme == "https" {
+				return fmt.Errorf("h2c: endpoint %d is https; h2c is for http:// endpoints", i)
+			}
 		}
 	}
 	if err := checkHealth(u.Health); err != nil {
@@ -173,6 +186,29 @@ func checkListener(l Listener, names map[string]bool, addrs map[string]string, u
 			return errors.New("bump: ca_dir is required")
 		}
 	}
+	if l.Connect {
+		switch {
+		case len(l.TLS) > 0:
+			return errors.New("connect and tls are exclusive")
+		case l.ProxyProtocol:
+			return errors.New("connect and proxy_protocol are exclusive")
+		case !loopback(l.Address):
+			return errors.New("connect: address must be loopback")
+		}
+	}
+	if l.ProxyProtocol && !loopback(l.Address) {
+		return errors.New("proxy_protocol: address must be loopback") // the header is trusted as sent
+	}
+	hooks := make(map[string]bool)
+	for i, h := range l.Hooks {
+		switch {
+		case h.Name == "":
+			return fmt.Errorf("hook %d: empty name", i)
+		case hooks[h.Name]:
+			return fmt.Errorf("hook %d: %q listed twice", i, h.Name)
+		}
+		hooks[h.Name] = true
+	}
 	if len(l.Hosts) == 0 {
 		return errors.New("no hosts")
 	}
@@ -230,16 +266,58 @@ func checkRoute(r Route, earlier []Route, upstreams map[string]bool) error {
 	case !upstreams[r.Upstream]:
 		return fmt.Errorf("unknown upstream %q", r.Upstream)
 	}
+	for _, m := range r.Methods {
+		if m == "" || m != strings.ToUpper(m) {
+			return fmt.Errorf("method %q must be uppercase", m)
+		}
+	}
+	for i, h := range r.Headers {
+		if h.Name == "" {
+			return fmt.Errorf("header %d: empty name", i)
+		}
+		if err := checkHeaderName(h.Name); err != nil {
+			return fmt.Errorf("header %d: %w", i, err)
+		}
+	}
 	for _, e := range earlier {
-		if Covers(e.Prefix, r.Prefix) {
+		if Covers(e.Prefix, r.Prefix) && acceptsAll(e, r) {
 			return fmt.Errorf("unreachable, covered by %q", e.Prefix)
 		}
 	}
 	return nil
 }
 
+// acceptsAll reports whether e accepts every request r does: e allows all of r's
+// methods (or any method), and r requires each header e requires.
+func acceptsAll(e, r Route) bool {
+	if len(e.Methods) > 0 && (len(r.Methods) == 0 || !subset(r.Methods, e.Methods)) {
+		return false
+	}
+	for _, eh := range e.Headers {
+		if !slices.ContainsFunc(r.Headers, func(rh HeaderMatch) bool { return rh.implies(eh) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// implies reports whether every request meeting m also meets o.
+func (m HeaderMatch) implies(o HeaderMatch) bool {
+	return http.CanonicalHeaderKey(m.Name) == http.CanonicalHeaderKey(o.Name) && (o.Value == "" || o.Value == m.Value)
+}
+
+func subset(a, b []string) bool {
+	return !slices.ContainsFunc(a, func(s string) bool { return !slices.Contains(b, s) })
+}
+
 // Covers reports whether prefix matches path on a segment boundary:
 // "/v1" covers "/v1" and "/v1/chat" but not "/v10".
 func Covers(prefix, path string) bool {
 	return prefix == "/" || path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
+func loopback(addr string) bool {
+	host, _, _ := net.SplitHostPort(addr)
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }
