@@ -119,21 +119,6 @@ func TestRevalidatedButNoLongerStorableIsDropped(t *testing.T) {
 	}
 }
 
-func TestClientConditionalRequestIsNotRewritten(t *testing.T) {
-	var sent http.Header
-	h, clk, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
-		sent = r.Header.Clone()
-		versioned("hello", nil)(w, r)
-	})
-	do(h, http.MethodGet, "/a")
-	clk.add(60 * time.Second)
-
-	rec := do(h, http.MethodGet, "/a", "If-None-Match", `"v0"`)
-	if sent.Get("If-None-Match") != `"v0"` || rec.Code != http.StatusOK {
-		t.Errorf("sent If-None-Match %q, got %d; want the client's own validator passed through", sent.Get("If-None-Match"), rec.Code)
-	}
-}
-
 func TestRevalidationRestartsAge(t *testing.T) {
 	h, clk, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("If-None-Match") != "" {
@@ -177,5 +162,23 @@ func TestNotModifiedNeverReachesTheClient(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "hello" || rec.Flushed {
 		t.Errorf("got %d %q, flushed %v; want the stored 200 hello, nothing of the 304", rec.Code, rec.Body, rec.Flushed)
+	}
+}
+
+func TestRevalidationAsksOnlyOurQuestion(t *testing.T) {
+	var sent http.Header
+	h, clk, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		sent = r.Header.Clone()
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Last-Modified", "Tue, 24 Nov 2026 10:00:00 GMT")
+		io.WriteString(w, "hello")
+	})
+	do(h, http.MethodGet, "/a")
+	clk.add(60 * time.Second)
+	do(h, http.MethodGet, "/a", "If-None-Match", `"x"`)
+
+	if sent.Get("If-None-Match") != "" || sent.Get("If-Modified-Since") != "Tue, 24 Nov 2026 10:00:00 GMT" {
+		t.Errorf("sent If-None-Match %q, If-Modified-Since %q; want only our own validator",
+			sent.Get("If-None-Match"), sent.Get("If-Modified-Since"))
 	}
 }

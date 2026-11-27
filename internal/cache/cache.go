@@ -54,7 +54,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !leader {
 		f.wait(r.Context())
 		if served, stale, reason = h.serveFresh(w, r, key); !served {
-			h.fetch(w, r, key, reason, true, stale, nil)
+			h.fetch(w, r, key, reason, store, stale, nil)
 		}
 		return
 	}
@@ -62,7 +62,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 3. Fetch it ourselves; requests that arrive meanwhile wait for us.
 	release := func() { h.flights.release(key, f) }
 	defer release() // after fetch has stored the response, and also if the upstream aborts
-	h.fetch(w, r, key, reason, true, stale, release)
+	h.fetch(w, r, key, reason, store, stale, release)
 }
 
 // serveFresh answers from the store if it holds a fresh copy for r. Otherwise it
@@ -73,7 +73,7 @@ func (h *Handler) serveFresh(w http.ResponseWriter, r *http.Request, key string)
 	if reason != "" {
 		return false, e, reason
 	}
-	serveHit(w, e, now)
+	serveHit(w, r, e, now)
 	return true, nil, ""
 }
 
@@ -88,10 +88,11 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request, key, reason stri
 			return h.policy.freshFor(r.Header, code, hdr, now)
 		}
 	}
+	out := r
 	if cr := conditional(r, stale); cr != nil {
-		r, c.pending = cr, make(http.Header)
+		out, c.pending = cr, make(http.Header)
 	}
-	h.next.ServeHTTP(c, r)
+	h.next.ServeHTTP(c, out)
 	if c.notModified {
 		h.refresh(w, r, key, stale, c.header, now)
 		return
@@ -116,7 +117,7 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request, key string, st
 	} else {
 		h.store.delete(key)
 	}
-	writeEntry(w, e, now, name+"; fwd=stale; fwd-status=304")
+	writeEntry(w, r, e, now, name+"; fwd=stale; fwd-status=304")
 }
 
 // conditional returns r asking the upstream only whether e changed (RFC 9111 §4.3.1),
@@ -130,6 +131,7 @@ func conditional(r *http.Request, e *entry) *http.Request {
 		return nil
 	}
 	c := r.Clone(r.Context())
+	c.Header.Del("If-None-Match") // the client's would outrank our If-Modified-Since
 	if etag != "" {
 		c.Header.Set("If-None-Match", etag)
 	}
@@ -207,19 +209,44 @@ func isSafe(method string) bool {
 	return false
 }
 
-func serveHit(w http.ResponseWriter, e *entry, now time.Time) {
+func serveHit(w http.ResponseWriter, r *http.Request, e *entry, now time.Time) {
 	ttl := e.freshFor - now.Sub(e.storedAt)
-	writeEntry(w, e, now, fmt.Sprintf("%s; hit; ttl=%d", name, int(ttl.Seconds())))
+	writeEntry(w, r, e, now, fmt.Sprintf("%s; hit; ttl=%d", name, int(ttl.Seconds())))
 }
 
-// writeEntry sends e to the client with its Age at now and cacheStatus.
-func writeEntry(w http.ResponseWriter, e *entry, now time.Time, cacheStatus string) {
+// notModifiedFields are the stored fields a 304 repeats (RFC 9110 §15.4.5).
+var notModifiedFields = []string{"Cache-Control", "Content-Location", "Date", "Etag", "Expires", "Last-Modified", "Vary"}
+
+// writeEntry answers r from e, with its Age at now and cacheStatus.
+func writeEntry(w http.ResponseWriter, r *http.Request, e *entry, now time.Time, cacheStatus string) {
+	status, header, body := e.status, e.header, e.body
+	if e.status/100 == 2 && unchanged(r.Header, e.header) {
+		// The client already has this version: tell it so, without the body.
+		status, header, body = http.StatusNotModified, only(e.header, notModifiedFields), nil
+	}
+	if r.Method == http.MethodHead {
+		body = nil
+	}
+
 	h := w.Header()
-	for k, vs := range e.header {
+	for k, vs := range header {
 		h[k] = slices.Clone(vs) // a later layer may append; never share the stored slices
 	}
 	h.Set("Age", strconv.Itoa(int((e.initialAge + now.Sub(e.storedAt)).Seconds())))
 	h.Add("Cache-Status", cacheStatus)
-	w.WriteHeader(e.status)
-	w.Write(e.body)
+	w.WriteHeader(status)
+	if len(body) > 0 {
+		w.Write(body)
+	}
+}
+
+// only returns the fields of h named in names.
+func only(h http.Header, names []string) http.Header {
+	kept := make(http.Header)
+	for _, n := range names {
+		if vs, ok := h[n]; ok {
+			kept[n] = vs
+		}
+	}
+	return kept
 }

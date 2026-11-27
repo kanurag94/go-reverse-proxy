@@ -29,16 +29,18 @@ func newPolicy(extra []string) policy {
 }
 
 // requestPolicy reports whether a stored response may answer r, and whether
-// the response to r may be stored.
+// the response to r may be stored. A HEAD may be answered from a stored GET,
+// but its own response has no body to store.
 func requestPolicy(r *http.Request) (use, store bool) {
-	if r.Method != http.MethodGet || r.Header.Get("Upgrade") != "" || r.Header.Get("Range") != "" {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead || r.Header.Get("Upgrade") != "" || r.Header.Get("Range") != "" {
 		return false, false
 	}
-	for _, h := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range"} {
+	for _, h := range []string{"If-Match", "If-Unmodified-Since", "If-Range"} {
 		if r.Header.Get(h) != "" {
-			return false, false
+			return false, false // preconditions guard writes and ranges; the upstream decides
 		}
 	}
+	store = r.Method == http.MethodGet
 	cc := parseCacheControl(r.Header["Cache-Control"])
 	if len(cc) == 0 {
 		cc = parseCacheControl(r.Header["Pragma"]) // HTTP/1.0 clients; ignored when Cache-Control is present
@@ -47,9 +49,35 @@ func requestPolicy(r *http.Request) (use, store bool) {
 		return false, false
 	}
 	if has(cc, "no-cache") || cc["max-age"] == "0" {
-		return false, true
+		return false, store
 	}
-	return true, true
+	return true, store
+}
+
+// unchanged reports whether a client sending req already has the response with
+// header stored: by its If-None-Match, or, only without one, its If-Modified-Since
+// (RFC 9110 §13.1.2, §13.1.3, §13.2.2).
+func unchanged(req, stored http.Header) bool {
+	if lines := req["If-None-Match"]; len(lines) > 0 {
+		return tagListMatches(lines, stored.Get("ETag"))
+	}
+	since, errSince := http.ParseTime(req.Get("If-Modified-Since"))
+	modified, errModified := http.ParseTime(stored.Get("Last-Modified"))
+	return errSince == nil && errModified == nil && !modified.After(since)
+}
+
+// tagListMatches reports whether If-None-Match values name etag, comparing weakly
+// as If-None-Match does, or are "*".
+func tagListMatches(lines []string, etag string) bool {
+	for _, line := range lines {
+		for tag := range strings.SplitSeq(line, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag == "*" || etag != "" && strings.TrimPrefix(tag, "W/") == strings.TrimPrefix(etag, "W/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // freshFor returns how long the response stays fresh; zero means do not store it.

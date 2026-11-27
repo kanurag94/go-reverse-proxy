@@ -46,11 +46,14 @@ func TestRequestPolicy(t *testing.T) {
 		use, store bool
 	}{
 		{"plain GET", http.MethodGet, nil, true, true},
-		{"HEAD", http.MethodHead, nil, false, false},
+		{"HEAD", http.MethodHead, nil, true, false},
 		{"POST", http.MethodPost, nil, false, false},
 		{"range", http.MethodGet, hdr("Range", "bytes=0-9"), false, false},
-		{"if-none-match", http.MethodGet, hdr("If-None-Match", `"v1"`), false, false},
-		{"if-modified-since", http.MethodGet, hdr("If-Modified-Since", "Tue, 24 Nov 2026 10:00:00 GMT"), false, false},
+		{"if-none-match", http.MethodGet, hdr("If-None-Match", `"v1"`), true, true},
+		{"if-modified-since", http.MethodGet, hdr("If-Modified-Since", "Tue, 24 Nov 2026 10:00:00 GMT"), true, true},
+		{"if-match", http.MethodGet, hdr("If-Match", `"v1"`), false, false},
+		{"if-unmodified-since", http.MethodGet, hdr("If-Unmodified-Since", "Tue, 24 Nov 2026 10:00:00 GMT"), false, false},
+		{"if-range", http.MethodGet, hdr("If-Range", `"v1"`), false, false},
 		{"upgrade", http.MethodGet, hdr("Upgrade", "websocket"), false, false},
 		{"no-store", http.MethodGet, hdr("Cache-Control", "no-store"), false, false},
 		{"no-cache", http.MethodGet, hdr("Cache-Control", "no-cache"), false, true},

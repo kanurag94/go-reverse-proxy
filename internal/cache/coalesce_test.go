@@ -203,3 +203,35 @@ func TestNoCacheRequestsDoNotWait(t *testing.T) {
 	unblock()
 	waitAll(t, &wg)
 }
+
+func TestHeadWaiterIsNotStored(t *testing.T) {
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	var gets atomic.Int32
+	h, _, _ := setup(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Cache-Control", "max-age=60")
+			return
+		}
+		if gets.Add(1) == 1 {
+			<-release
+			w.Header().Set("Cache-Control", "no-store")
+			io.WriteString(w, "first")
+			return
+		}
+		cacheable("hello")(w, r)
+	})
+
+	var wg sync.WaitGroup
+	wg.Go(func() { do(h, http.MethodGet, "/a") })
+	eventually(t, "the GET to lead", func() bool { return flightFor(h, key) != nil })
+	wg.Go(func() { do(h, http.MethodHead, "/a") })
+	eventually(t, "the HEAD to wait", func() bool { return waiters(h, key) == 1 })
+	unblock()
+	waitAll(t, &wg)
+
+	if rec := do(h, http.MethodGet, "/a"); rec.Body.String() != "hello" {
+		t.Errorf("GET got %q; want hello, not the HEAD's empty body", rec.Body)
+	}
+}
