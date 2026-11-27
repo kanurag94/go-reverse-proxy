@@ -3,6 +3,7 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"slices"
@@ -43,7 +44,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. A fresh copy is stored: serve it.
+	// 1. A fresh copy is stored, or a stale one we may serve while it is refreshed: serve it.
 	served, stale, reason := h.serveFresh(w, r, key)
 	if served {
 		return
@@ -65,21 +66,55 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.fetch(w, r, key, reason, store, stale, release)
 }
 
-// serveFresh answers from the store if it holds a fresh copy for r. Otherwise it
+// serveFresh answers from the store if it holds a fresh copy for r, or a stale
+// one that may be served while it is refreshed in the background. Otherwise it
 // returns the stale copy, if any, and the Cache-Status reason it could not.
 func (h *Handler) serveFresh(w http.ResponseWriter, r *http.Request, key string) (served bool, stale *entry, reason string) {
 	now := h.now()
 	e, reason := h.lookup(key, r, now)
-	if reason != "" {
+	switch {
+	case reason == "":
+	case reason == "stale" && e.staleFor(now) < whileRevalidate(e.header):
+		h.refreshInBackground(r, key, e)
+	default:
 		return false, e, reason
 	}
 	serveHit(w, r, e, now)
 	return true, nil, ""
 }
 
+// refreshInBackground fetches key again for later requests, unless a fetch for it
+// is already under way. It outlives r's client, and is a GET even for a HEAD, so
+// that what it stores has a body.
+func (h *Handler) refreshInBackground(r *http.Request, key string, stale *entry) {
+	f, started := h.flights.start(key)
+	if !started {
+		return
+	}
+	if h.store.get(key) != stale { // refreshed between our lookup and now
+		h.flights.release(key, f)
+		return
+	}
+	bg := r.Clone(context.WithoutCancel(r.Context()))
+	bg.Method = http.MethodGet
+	go func() {
+		defer h.flights.release(key, f)
+		h.fetch(discard{make(http.Header)}, bg, key, "stale", true, stale, nil)
+	}()
+}
+
+// discard takes a background refresh's response: nobody waits for it.
+type discard struct{ header http.Header }
+
+func (d discard) Header() http.Header       { return d.header }
+func (discard) Write(b []byte) (int, error) { return len(b), nil }
+func (discard) WriteHeader(int)             {}
+
 // fetch forwards r upstream, streaming the response to the client while keeping
 // a copy, and stores it if it may. With a stale copy that has validators it asks
-// only whether that copy changed. onGiveUp is told once nothing will be stored.
+// only whether that copy changed, and the copy answers the client instead when
+// the upstream says it has not, or fails while the copy may cover for it.
+// onGiveUp is told once nothing will be stored.
 func (h *Handler) fetch(w http.ResponseWriter, r *http.Request, key, reason string, store bool, stale *entry, onGiveUp func()) {
 	now := h.now() // before forwarding: an Age counted from here never under-reports
 	c := &capture{ResponseWriter: w, cacheStatus: name + "; fwd=" + reason, limit: h.store.maxObject, onGiveUp: onGiveUp}
@@ -88,13 +123,24 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request, key, reason stri
 			return h.policy.freshFor(r.Header, code, hdr, now)
 		}
 	}
-	out := r
-	if cr := conditional(r, stale); cr != nil {
-		out, c.pending = cr, make(http.Header)
+	out, asked := r, conditional(r, stale)
+	if asked != nil {
+		out = asked
+	}
+	onError := stale != nil && stale.staleFor(now) < ifError(stale.header)
+	if asked != nil || onError {
+		c.pending = make(http.Header)
+		c.standsIn = func(code int) bool {
+			return asked != nil && code == http.StatusNotModified || onError && failed(code)
+		}
 	}
 	h.next.ServeHTTP(c, out)
-	if c.notModified {
-		h.refresh(w, r, key, stale, c.header, now)
+	if c.stoodIn {
+		if c.code == http.StatusNotModified {
+			h.refresh(w, r, key, stale, c.header, now)
+		} else {
+			writeEntry(w, r, stale, now, fmt.Sprintf("%s; fwd=stale; fwd-status=%d", name, c.code))
+		}
 		return
 	}
 	c.implicitHeader() // a handler that wrote nothing still sent a response
@@ -160,6 +206,11 @@ func (h *Handler) lookup(key string, r *http.Request, now time.Time) (*entry, st
 		return e, "stale"
 	}
 	return e, ""
+}
+
+// staleFor is how long past fresh e is at now.
+func (e *entry) staleFor(now time.Time) time.Duration {
+	return now.Sub(e.storedAt) - e.freshFor
 }
 
 // updated returns a copy of e as revalidated at now by a 304 with header h: h's

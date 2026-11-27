@@ -80,6 +80,37 @@ func tagListMatches(lines []string, etag string) bool {
 	return false
 }
 
+// whileRevalidate is how long past fresh a response with header h may be served
+// while it is refreshed in the background (RFC 5861 §3).
+func whileRevalidate(h http.Header) time.Duration {
+	return staleWindow(h, "stale-while-revalidate")
+}
+
+// ifError is how long past fresh a response with header h may be served when
+// the upstream fails (RFC 5861 §4).
+func ifError(h http.Header) time.Duration {
+	return staleWindow(h, "stale-if-error")
+}
+
+// staleWindow reads a stale directive, which directives demanding revalidation
+// overrule (RFC 9111 §4.2.4; s-maxage implies proxy-revalidate).
+func staleWindow(h http.Header, directive string) time.Duration {
+	cc := parseCacheControl(h["Cache-Control"])
+	if has(cc, "must-revalidate", "proxy-revalidate", "s-maxage") {
+		return 0
+	}
+	return deltaSeconds(cc[directive])
+}
+
+// failed reports whether code says the upstream could not answer (RFC 5861 §4).
+func failed(code int) bool {
+	switch code {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
 // freshFor returns how long the response stays fresh; zero means do not store it.
 func (p policy) freshFor(req http.Header, status int, h http.Header, now time.Time) time.Duration {
 	cc := parseCacheControl(h["Cache-Control"])

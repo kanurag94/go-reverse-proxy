@@ -17,11 +17,13 @@ type capture struct {
 	onGiveUp    func()                                      // called once the response cannot be stored
 	limit       int64
 
-	// pending, when the request revalidates a stale copy, holds the response
-	// headers until the status shows whether they are for the client: a 304
-	// answers our question, not the client's, and is never passed on.
-	pending     http.Header
-	notModified bool
+	// While a stale copy may answer the client instead, pending holds the
+	// response headers until the status shows who answers. When standsIn says
+	// the copy does (our own 304, or an upstream failure it may cover), nothing
+	// of the response reaches the client.
+	pending  http.Header
+	standsIn func(code int) bool
+	stoodIn  bool
 
 	code   int
 	header http.Header   // the response headers before ours were added
@@ -40,13 +42,13 @@ func (c *capture) WriteHeader(code int) {
 	if c.pending != nil {
 		h := c.pending
 		c.pending = nil
-		if code == http.StatusNotModified {
-			c.code, c.header, c.notModified = code, h, true
+		if c.standsIn(code) {
+			c.code, c.header, c.stoodIn = code, h, true
 			return
 		}
 		maps.Copy(c.ResponseWriter.Header(), h)
 	}
-	if c.notModified {
+	if c.stoodIn {
 		return
 	}
 	if c.code == 0 {
@@ -72,8 +74,8 @@ func (c *capture) implicitHeader() {
 
 func (c *capture) Write(b []byte) (int, error) {
 	c.implicitHeader()
-	if c.notModified {
-		return len(b), nil // a 304 has no body; nothing of it reaches the client
+	if c.stoodIn {
+		return len(b), nil // the stale copy answers; nothing of this reaches the client
 	}
 	n, err := c.ResponseWriter.Write(b)
 	if c.fresh > 0 {
@@ -97,7 +99,7 @@ func (c *capture) giveUp() {
 // FlushError makes a flush before the first write still pass through WriteHeader.
 func (c *capture) FlushError() error {
 	c.implicitHeader()
-	if c.notModified {
+	if c.stoodIn {
 		return nil
 	}
 	return http.NewResponseController(c.ResponseWriter).Flush()

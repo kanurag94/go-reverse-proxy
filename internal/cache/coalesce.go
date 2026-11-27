@@ -32,6 +32,18 @@ func (g *group) join(key string) (f *flight, leader bool) {
 	return f, true
 }
 
+// start begins the flight for key, unless one is already under way.
+func (g *group) start(key string) (f *flight, started bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.inflight[key]; ok {
+		return nil, false
+	}
+	f = &flight{done: make(chan struct{})}
+	g.inflight[key] = f
+	return f, true
+}
+
 // release ends the flight and lets its waiters go. Safe to call more than once.
 func (g *group) release(key string, f *flight) {
 	f.once.Do(func() {
